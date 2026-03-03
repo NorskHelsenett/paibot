@@ -1,40 +1,47 @@
 display_information:
   name: paibot
-  description: AI-powered Slack bot
-  background_color: "#2c2d30"
+  description: Din private AI agent
+  background_color: "#000000"
+  long_description: "paibot er en intelligent AI-assistent integrert direkte i Slack. Svar på spørsmål, få hjelp med kode, tekst eller analyse – enten i kanaler via @paibot eller i en privat direktemelding med full samtalehistorikk."
 
 features:
+  app_home:
+    home_tab_enabled: false
+    messages_tab_enabled: true
+    messages_tab_read_only_enabled: false
   bot_user:
-    display_name: paibot
+    display_name: PAI
     always_online: true
 
 settings:
   socket_mode_enabled: true
+  interactivity:
+    is_enabled: true
   event_subscriptions:
     bot_events:
-      - app_mention        # @paibot mentions in channels
-      - message.channels   # Messages in public channels
-      - message.groups     # Messages in private channels
-      - message.im         # Direct messages
-      - message.mpim       # Group DMs
-      - reaction_added     # Reactions added to messages
+      - app_mention
+      - message.channels
+      - message.groups
+      - message.im
+      - message.mpim
+      - reaction_added
   org_deploy_enabled: false
   token_rotation_enabled: false
 
 oauth_config:
   scopes:
     bot:
-      - app_mentions:read   # Receive @mention events
-      - chat:write          # Post messages
-      - channels:history    # Read public channel messages & threads
-      - channels:read       # Look up channel info
-      - groups:history      # Read private channel messages & threads
-      - groups:read         # Look up private channel info
-      - im:history          # Read DM history
-      - im:read             # Access DM channels
-      - im:write            # Open DM conversations
-      - mpim:history        # Read group DM history
-      - links:read          # View URLs in messages
-      - links:write         # Show URL previews
-      - reactions:read      # View emoji reactions
-      - reactions:write     # Add/remove emoji reactions
+      - app_mentions:read
+      - chat:write
+      - chat:write.public
+      - channels:history
+      - channels:read
+      - groups:history
+      - groups:read
+      - im:history
+      - im:read
+      - im:write
+      - mpim:history
+      - mpim:read
+      - reactions:read
+      - reactions:write

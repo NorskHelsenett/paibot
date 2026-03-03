@@ -9,24 +9,31 @@ import (
 
 type AIClient struct {
 	client  *openai.Client
-	model   string
+	config  *BotConfig
 	history map[string][]openai.ChatCompletionMessage
 	mu      sync.RWMutex
 }
 
-func NewAIClient(baseURL, apiKey, model string) *AIClient {
+func NewAIClient(baseURL, apiKey string, config *BotConfig) *AIClient {
 	cfg := openai.DefaultConfig(apiKey)
 	cfg.BaseURL = baseURL
 
 	return &AIClient{
 		client:  openai.NewClientWithConfig(cfg),
-		model:   model,
+		config:  config,
 		history: make(map[string][]openai.ChatCompletionMessage),
 	}
 }
 
 func (a *AIClient) Chat(ctx context.Context, conversationID, userMessage string) (string, error) {
 	a.mu.Lock()
+	// Seed with system prompt on first message
+	if _, exists := a.history[conversationID]; !exists && a.config.Prompts.Chat != "" {
+		a.history[conversationID] = append(a.history[conversationID], openai.ChatCompletionMessage{
+			Role:    openai.ChatMessageRoleSystem,
+			Content: a.config.Prompts.Chat,
+		})
+	}
 	a.history[conversationID] = append(a.history[conversationID], openai.ChatCompletionMessage{
 		Role:    openai.ChatMessageRoleUser,
 		Content: userMessage,
@@ -35,10 +42,16 @@ func (a *AIClient) Chat(ctx context.Context, conversationID, userMessage string)
 	copy(messages, a.history[conversationID])
 	a.mu.Unlock()
 
-	resp, err := a.client.CreateChatCompletion(ctx, openai.ChatCompletionRequest{
-		Model:    a.model,
-		Messages: messages,
-	})
+	req := openai.ChatCompletionRequest{
+		Model:       a.config.Model,
+		Messages:    messages,
+		Temperature: a.config.Temp,
+	}
+	if a.config.MaxTokens > 0 {
+		req.MaxTokens = a.config.MaxTokens
+	}
+
+	resp, err := a.client.CreateChatCompletion(ctx, req)
 	if err != nil {
 		return "", err
 	}
@@ -61,11 +74,10 @@ func (a *AIClient) ChatWithThread(ctx context.Context, conversationID, userMessa
 	a.mu.Lock()
 	// Seed history with thread context so the bot can participate in the discussion
 	if _, exists := a.history[conversationID]; !exists && threadContext != "" {
+		prompt := a.config.Prompts.Thread + "\n\n" + threadContext
 		a.history[conversationID] = append(a.history[conversationID], openai.ChatCompletionMessage{
-			Role: openai.ChatMessageRoleSystem,
-			Content: "You are PAI, a helpful Slack bot participating in a thread discussion. " +
-				"Here is the conversation so far — read it to understand the context, " +
-				"then respond naturally to the latest message as a participant:\n\n" + threadContext,
+			Role:    openai.ChatMessageRoleSystem,
+			Content: prompt,
 		})
 	}
 	a.history[conversationID] = append(a.history[conversationID], openai.ChatCompletionMessage{
@@ -76,10 +88,16 @@ func (a *AIClient) ChatWithThread(ctx context.Context, conversationID, userMessa
 	copy(messages, a.history[conversationID])
 	a.mu.Unlock()
 
-	resp, err := a.client.CreateChatCompletion(ctx, openai.ChatCompletionRequest{
-		Model:    a.model,
-		Messages: messages,
-	})
+	req := openai.ChatCompletionRequest{
+		Model:       a.config.Model,
+		Messages:    messages,
+		Temperature: a.config.Temp,
+	}
+	if a.config.MaxTokens > 0 {
+		req.MaxTokens = a.config.MaxTokens
+	}
+
+	resp, err := a.client.CreateChatCompletion(ctx, req)
 	if err != nil {
 		return "", err
 	}
@@ -101,7 +119,7 @@ func (a *AIClient) Summarize(ctx context.Context, threadMessages string) (string
 	messages := []openai.ChatCompletionMessage{
 		{
 			Role:    openai.ChatMessageRoleSystem,
-			Content: "You are a helpful assistant. Summarize the following Slack thread conversation concisely, capturing the key points, decisions, and action items.",
+			Content: a.config.Prompts.Summarize,
 		},
 		{
 			Role:    openai.ChatMessageRoleUser,
@@ -109,10 +127,16 @@ func (a *AIClient) Summarize(ctx context.Context, threadMessages string) (string
 		},
 	}
 
-	resp, err := a.client.CreateChatCompletion(ctx, openai.ChatCompletionRequest{
-		Model:    a.model,
-		Messages: messages,
-	})
+	req := openai.ChatCompletionRequest{
+		Model:       a.config.Model,
+		Messages:    messages,
+		Temperature: a.config.Temp,
+	}
+	if a.config.MaxTokens > 0 {
+		req.MaxTokens = a.config.MaxTokens
+	}
+
+	resp, err := a.client.CreateChatCompletion(ctx, req)
 	if err != nil {
 		return "", err
 	}

@@ -1,0 +1,206 @@
+name: Build and Deploy
+
+on:
+  push:
+    paths:
+      - '**.go'
+      - 'go.mod'
+      - 'go.sum'
+      - 'Dockerfile'
+      - '.helm/**'
+      - '.github/workflows/build.yaml'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+      repository: ${{ steps.export-vars.outputs.repository }}
+    env:
+      REGISTRY_ACCESS_TOKEN: ${{ secrets.REGISTRY_ACCESS_TOKEN || secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Derive registry host
+        run: |
+          set -e
+          host="${GITHUB_SERVER_URL#https://}"
+          host="${host#http://}"
+          if [ "$host" = "github.com" ]; then
+            echo "REGISTRY_HOST=ghcr.io" >> "$GITHUB_ENV"
+          else
+            echo "REGISTRY_HOST=$host" >> "$GITHUB_ENV"
+          fi
+          repo_lower=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          echo "REPOSITORY_LOWER=$repo_lower" >> "$GITHUB_ENV"
+
+      - name: Docker metadata
+        uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ${{ env.REGISTRY_HOST }}/${{ env.REPOSITORY_LOWER }}
+          tags: |
+            type=ref,event=branch
+            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', 'main') }}
+            type=raw,value=dev,enable=${{ github.ref != format('refs/heads/{0}', 'main') }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: |
+            image=moby/buildkit:latest
+          buildkitd-flags: --debug
+
+      - name: Get git commit timestamp for reproducible builds
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)" >> "$GITHUB_ENV"
+
+      - name: Export repository info
+        id: export-vars
+        run: echo "repository=${{ env.REGISTRY_HOST }}/${{ env.REPOSITORY_LOWER }}" >> "$GITHUB_OUTPUT"
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY_HOST }}
+          username: ${{ github.actor }}
+          password: ${{ env.REGISTRY_ACCESS_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        id: build
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=registry,ref=${{ env.REGISTRY_HOST }}/${{ env.REPOSITORY_LOWER }}:buildcache
+          cache-to: type=registry,ref=${{ env.REGISTRY_HOST }}/${{ env.REPOSITORY_LOWER }}:buildcache,mode=max
+          provenance: false
+          sbom: false
+          build-args: |
+            SOURCE_DATE_EPOCH=${{ env.SOURCE_DATE_EPOCH }}
+
+  deploy-helm:
+    runs-on: ubuntu-latest
+    needs: [build]
+    permissions:
+      contents: read
+      packages: write
+    env:
+      REGISTRY_ACCESS_TOKEN: ${{ secrets.REGISTRY_ACCESS_TOKEN || secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Derive registry host
+        run: |
+          set -e
+          host="${GITHUB_SERVER_URL#https://}"
+          host="${host#http://}"
+          if [ "$host" = "github.com" ]; then
+            echo "REGISTRY_HOST=ghcr.io" >> "$GITHUB_ENV"
+          else
+            echo "REGISTRY_HOST=$host" >> "$GITHUB_ENV"
+          fi
+          repo_lower=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          echo "REPOSITORY_LOWER=$repo_lower" >> "$GITHUB_ENV"
+
+      - name: Install Helm
+        uses: azure/setup-helm@v3
+
+      - name: Login to OCI registry for Helm
+        run: |
+          echo "${{ env.REGISTRY_ACCESS_TOKEN }}" | helm registry login "${{ env.REGISTRY_HOST }}" -u "${{ github.actor }}" --password-stdin
+
+      - name: Push Helm chart
+        run: |
+          set -euo pipefail
+          repo_path=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          chart_name=$(awk -F': ' '/^name:/ {print $2; exit}' .helm/Chart.yaml)
+
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            chart_repo="oci://${{ env.REGISTRY_HOST }}/$repo_path"
+          else
+            chart_repo="oci://${{ env.REGISTRY_HOST }}/$repo_path/helm/dev"
+          fi
+          chart_ref="${chart_repo}/${chart_name}"
+
+          CHART_YAML_VERSION=$(awk -F': ' '/^version:/ {print $2; exit}' .helm/Chart.yaml | tr -d ' ')
+
+          tmp_chart_metadata=$(mktemp)
+          if helm show chart "$chart_ref" > "$tmp_chart_metadata" 2>/dev/null; then
+            PUBLISHED_VERSION=$(awk -F': ' '/^version:/ {print $2; exit}' "$tmp_chart_metadata" | tr -d ' ')
+          else
+            echo "No existing chart found for $chart_ref, starting at 0.0.0"
+            PUBLISHED_VERSION="0.0.0"
+          fi
+          rm -f "$tmp_chart_metadata"
+
+          version_gt() {
+            test "$(printf '%s\n' "$@" | sort -V | head -n 1)" != "$1"
+          }
+
+          if version_gt "$CHART_YAML_VERSION" "$PUBLISHED_VERSION"; then
+            NEW_VERSION="$CHART_YAML_VERSION"
+            echo "Using Chart.yaml version $NEW_VERSION (higher than published $PUBLISHED_VERSION)"
+          else
+            IFS='.' read -r major minor patch <<< "$PUBLISHED_VERSION"
+            NEW_VERSION="$major.$minor.$((patch+1))"
+            echo "Bumping chart version: $PUBLISHED_VERSION -> $NEW_VERSION"
+            sed -i -E "s/^version: .*/version: $NEW_VERSION/" .helm/Chart.yaml
+          fi
+
+          echo "Final version: $NEW_VERSION"
+
+          IMAGE_DIGEST="${{ needs.build.outputs.digest }}"
+          IMAGE_TAG="latest@${IMAGE_DIGEST}"
+          IMAGE_REPO="${{ needs.build.outputs.repository }}"
+
+          echo "Injecting image repository: $IMAGE_REPO"
+          echo "Injecting image tag with digest: $IMAGE_TAG"
+
+          python3 - <<EOF
+          import pathlib
+
+          image_tag = "${IMAGE_TAG}"
+          image_repo = "${IMAGE_REPO}"
+          path = pathlib.Path(".helm/values.yaml")
+          lines = path.read_text().splitlines()
+
+          in_image_section = False
+          for idx, line in enumerate(lines):
+              stripped = line.lstrip()
+
+              if line.startswith("image:") and not line.startswith((" ", "\t")):
+                  in_image_section = True
+                  continue
+
+              if in_image_section and stripped and not line.startswith((" ", "\t")):
+                  in_image_section = False
+
+              if in_image_section:
+                  if stripped.startswith("repository:"):
+                      indent = line[:len(line) - len(stripped)]
+                      lines[idx] = f'{indent}repository: {image_repo}'
+                  elif stripped.startswith("tag:"):
+                      indent = line[:len(line) - len(stripped)]
+                      lines[idx] = f'{indent}tag: "{image_tag}"'
+
+          path.write_text("\n".join(lines) + "\n")
+          EOF
+
+          helm package .helm --version "$NEW_VERSION"
+          helm push "${chart_name}-${NEW_VERSION}.tgz" "$chart_repo"

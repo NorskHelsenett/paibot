@@ -1,0 +1,6 @@
+.helm
+.github
+.devcontainer
+.env
+.env-example
+slack-manifest.yml

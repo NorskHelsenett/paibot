@@ -16,35 +16,40 @@ func main() {
 		log.Println("No .env file found, using environment variables")
 	}
 
-	verbose := flag.Bool("verbose", false, "Enable verbose/debug logging")
+	configPath := flag.String("config", "config.yaml", "Path to config file")
+	flag.BoolVar(&verboseLogging, "verbose", false, "Enable verbose/debug logging")
 	flag.Parse()
-	if !*verbose {
-		// Also check VERBOSE_LOGS env var
+	if !verboseLogging {
 		env := strings.ToLower(os.Getenv("VERBOSE_LOGS"))
 		if env == "1" || env == "true" || env == "yes" {
-			*verbose = true
+			verboseLogging = true
 		}
 	}
+
+	botCfg, err := LoadConfig(*configPath)
+	if err != nil {
+		log.Fatalf("Failed to load config: %v", err)
+	}
+	log.Printf("Config loaded: model=%s temperature=%.1f", botCfg.Model, botCfg.Temp)
 
 	appToken := os.Getenv("SLACK_APP_TOKEN")
 	botToken := os.Getenv("SLACK_BOT_TOKEN")
 	openAIBaseURL := os.Getenv("OPENAI_BASE_URL")
 	openAIKey := os.Getenv("OPENAI_API_KEY")
-	openAIModel := os.Getenv("OPENAI_MODEL")
 
 	if appToken == "" || botToken == "" {
 		log.Fatal("SLACK_APP_TOKEN and SLACK_BOT_TOKEN must be set")
 	}
-	if openAIBaseURL == "" || openAIKey == "" || openAIModel == "" {
-		log.Fatal("OPENAI_BASE_URL, OPENAI_API_KEY, and OPENAI_MODEL must be set")
+	if openAIBaseURL == "" || openAIKey == "" {
+		log.Fatal("OPENAI_BASE_URL and OPENAI_API_KEY must be set")
 	}
 
-	ai := NewAIClient(openAIBaseURL, openAIKey, openAIModel)
+	ai := NewAIClient(openAIBaseURL, openAIKey, botCfg)
 
 	clientOpts := []slack.Option{
 		slack.OptionAppLevelToken(appToken),
 	}
-	if *verbose {
+	if verboseLogging {
 		clientOpts = append(clientOpts,
 			slack.OptionDebug(true),
 			slack.OptionLog(log.New(os.Stdout, "slack: ", log.LstdFlags|log.Lshortfile)),
@@ -61,7 +66,7 @@ func main() {
 		authResp.User, authResp.UserID, authResp.Team, authResp.TeamID)
 
 	socketOpts := []socketmode.Option{}
-	if *verbose {
+	if verboseLogging {
 		socketOpts = append(socketOpts,
 			socketmode.OptionDebug(true),
 			socketmode.OptionLog(log.New(os.Stdout, "socketmode: ", log.LstdFlags|log.Lshortfile)),
