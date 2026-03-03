@@ -1,0 +1,40 @@
+display_information:
+  name: paibot
+  description: AI-powered Slack bot
+  background_color: "#2c2d30"
+
+features:
+  bot_user:
+    display_name: paibot
+    always_online: true
+
+settings:
+  socket_mode_enabled: true
+  event_subscriptions:
+    bot_events:
+      - app_mention        # @paibot mentions in channels
+      - message.channels   # Messages in public channels
+      - message.groups     # Messages in private channels
+      - message.im         # Direct messages
+      - message.mpim       # Group DMs
+      - reaction_added     # Reactions added to messages
+  org_deploy_enabled: false
+  token_rotation_enabled: false
+
+oauth_config:
+  scopes:
+    bot:
+      - app_mentions:read   # Receive @mention events
+      - chat:write          # Post messages
+      - channels:history    # Read public channel messages & threads
+      - channels:read       # Look up channel info
+      - groups:history      # Read private channel messages & threads
+      - groups:read         # Look up private channel info
+      - im:history          # Read DM history
+      - im:read             # Access DM channels
+      - im:write            # Open DM conversations
+      - mpim:history        # Read group DM history
+      - links:read          # View URLs in messages
+      - links:write         # Show URL previews
+      - reactions:read      # View emoji reactions
+      - reactions:write     # Add/remove emoji reactions
