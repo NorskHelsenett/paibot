@@ -1,5 +1,5 @@
 # AI model settings
-model: "nhn-medium"
+model: "nhn-large:fast"
 temperature: 0.7
 max_tokens: 0 # 0 = use model default
 
