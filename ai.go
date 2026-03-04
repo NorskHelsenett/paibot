@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/openai/openai-go"
 	"github.com/openai/openai-go/option"
@@ -44,6 +45,9 @@ func (a *AIClient) sendMessage(ctx context.Context, system string, messages []op
 	resp, err := a.client.Chat.Completions.New(ctx, p)
 	if err != nil {
 		return "", err
+	}
+	if len(resp.Choices) == 0 {
+		return "", fmt.Errorf("AI returned no choices")
 	}
 	return resp.Choices[0].Message.Content, nil
 }

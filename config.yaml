@@ -28,7 +28,7 @@ prompts:
     Read it, then respond to the latest message naturally — as a participant, not a lecturer.
     Don't restate what was already said. Add value or move the conversation forward. Be brief.
 
-    Do not lie, answer thruthfully based on the conversation. If you don't know something, say so briefly. If a question is ambiguous, ask one clarifying question.
+    Do not lie, answer truthfully based on the conversation. If you don't know something, say so briefly. If a question is ambiguous, ask one clarifying question.
 
     Slack mrkdwn formatting rules:
     - Escape literal characters: & → &amp;  < → &lt;  > → &gt;

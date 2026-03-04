@@ -40,6 +40,14 @@ func react(client *slack.Client, add bool, emoji, channel, ts string) {
 	}
 }
 
+// reactError replaces the thinking reaction with :usererror: and returns false,
+// intended to be used as: if reactError(...) { return }.
+func reactError(client *slack.Client, eid, msg, channel, ts string, err error) {
+	log.Printf("[%s] %s: %v", eid, msg, err)
+	react(client, false, "thinking_face", channel, ts)
+	react(client, true, "usererror", channel, ts)
+}
+
 // fetchThreadContext retrieves all messages in a thread and formats them for AI context.
 func fetchThreadContext(client *slack.Client, channel, threadTS string) (string, error) {
 	msgs, _, _, err := client.GetConversationReplies(&slack.GetConversationRepliesParameters{
@@ -93,15 +101,17 @@ func handleAppMention(client *slack.Client, ai *AIClient, event *slackevents.App
 		threadContext, fetchErr := fetchThreadContext(client, event.Channel, threadTS)
 		if fetchErr != nil {
 			logVerbose("[%s] failed to fetch thread context: %v", eid, fetchErr)
+			reply, err = ai.Chat(context.Background(), text)
+		} else {
+			reply, err = ai.ChatWithThread(context.Background(), text, threadContext)
 		}
-		reply, err = ai.ChatWithThread(context.Background(), text, threadContext)
 	} else {
 		reply, err = ai.Chat(context.Background(), text)
 	}
 
 	if err != nil {
-		log.Printf("[%s] error from AI: %v", eid, err)
-		reply = "Sorry, I encountered an error. Please try again."
+		reactError(client, eid, "error from AI", event.Channel, event.TimeStamp, err)
+		return
 	}
 
 	if _, _, postErr := client.PostMessage(
@@ -109,7 +119,8 @@ func handleAppMention(client *slack.Client, ai *AIClient, event *slackevents.App
 		slack.MsgOptionText(reply, false),
 		slack.MsgOptionTS(threadTS),
 	); postErr != nil {
-		log.Printf("[%s] failed to post reply: %v", eid, postErr)
+		reactError(client, eid, "failed to post reply", event.Channel, event.TimeStamp, postErr)
+		return
 	}
 
 	react(client, false, "thinking_face", event.Channel, event.TimeStamp)
@@ -145,22 +156,25 @@ func handleDM(client *slack.Client, ai *AIClient, event *slackevents.MessageEven
 		threadContext, fetchErr := fetchThreadContext(client, event.Channel, threadTS)
 		if fetchErr != nil {
 			logVerbose("[%s] failed to fetch DM thread context: %v", eid, fetchErr)
+			reply, err = ai.Chat(context.Background(), text)
+		} else {
+			reply, err = ai.ChatWithThread(context.Background(), text, threadContext)
 		}
-		reply, err = ai.ChatWithThread(context.Background(), text, threadContext)
 	} else {
 		reply, err = ai.Chat(context.Background(), text)
 	}
 	if err != nil {
-		log.Printf("[%s] error from AI: %v", eid, err)
-		reply = "Sorry, I encountered an error. Please try again."
+		reactError(client, eid, "error from AI", event.Channel, event.TimeStamp, err)
+		return
 	}
 
-	if _, _, err = client.PostMessage(
+	if _, _, postErr := client.PostMessage(
 		event.Channel,
 		slack.MsgOptionText(reply, false),
 		slack.MsgOptionTS(threadTS),
-	); err != nil {
-		log.Printf("[%s] failed to post reply: %v", eid, err)
+	); postErr != nil {
+		reactError(client, eid, "failed to post reply", event.Channel, event.TimeStamp, postErr)
+		return
 	}
 
 	react(client, false, "thinking_face", event.Channel, event.TimeStamp)
