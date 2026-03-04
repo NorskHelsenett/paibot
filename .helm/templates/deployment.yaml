@@ -5,9 +5,7 @@ metadata:
   labels:
     {{- include "paibot.labels" . | nindent 4 }}
 spec:
-  {{- if not .Values.autoscaling.enabled }}
   replicas: {{ .Values.replicaCount }}
-  {{- end }}
   selector:
     matchLabels:
       {{- include "paibot.selectorLabels" . | nindent 6 }}
@@ -40,6 +38,9 @@ spec:
           {{- end }}
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- if .Values.config }}
+          args: ["--config", "/etc/paibot/config.yaml"]
+          {{- end }}
           {{- if .Values.existingSecret }}
           envFrom:
             - secretRef:
@@ -56,14 +57,24 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-          {{- with .Values.volumeMounts }}
           volumeMounts:
+            {{- if .Values.config }}
+            - name: config
+              mountPath: /etc/paibot
+              readOnly: true
+            {{- end }}
+            {{- with .Values.volumeMounts }}
             {{- toYaml . | nindent 12 }}
-          {{- end }}
-      {{- with .Values.volumes }}
+            {{- end }}
       volumes:
+        {{- if .Values.config }}
+        - name: config
+          configMap:
+            name: {{ include "paibot.fullname" . }}-config
+        {{- end }}
+        {{- with .Values.volumes }}
         {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

@@ -8,5 +8,6 @@ RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /app .
 FROM scratch
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 COPY --from=build /app /app
-COPY --from=build /src/config.yaml /config.yaml
+COPY --from=build /src/config.yaml /etc/paibot/config.yaml
 ENTRYPOINT ["/app"]
+CMD ["--config", "/etc/paibot/config.yaml"]
