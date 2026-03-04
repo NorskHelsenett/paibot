@@ -67,3 +67,26 @@ func (a *AIClient) ChatWithThread(ctx context.Context, userMessage, threadContex
 		openai.UserMessage(userMessage),
 	})
 }
+
+// ChatWithFiles answers a message that includes file attachments.
+func (a *AIClient) ChatWithFiles(ctx context.Context, userMessage string, files []FileAttachment) (string, error) {
+	parts := []openai.ChatCompletionContentPartUnionParam{
+		openai.TextContentPart(userMessage),
+	}
+	parts = append(parts, filesToContentParts(files)...)
+	return a.sendMessage(ctx, a.config.Prompts.Chat, []openai.ChatCompletionMessageParamUnion{
+		openai.UserMessage(parts),
+	})
+}
+
+// ChatWithThreadAndFiles answers using thread context and file attachments.
+func (a *AIClient) ChatWithThreadAndFiles(ctx context.Context, userMessage, threadContext string, files []FileAttachment) (string, error) {
+	parts := []openai.ChatCompletionContentPartUnionParam{
+		openai.TextContentPart(userMessage),
+	}
+	parts = append(parts, filesToContentParts(files)...)
+	return a.sendMessage(ctx, a.config.Prompts.Thread, []openai.ChatCompletionMessageParamUnion{
+		openai.UserMessage(threadContext),
+		openai.UserMessage(parts),
+	})
+}

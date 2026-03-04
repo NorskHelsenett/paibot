@@ -74,7 +74,7 @@ func main() {
 	}
 	socketClient := socketmode.New(client, socketOpts...)
 
-	go handleEvents(client, ai, socketClient)
+	go handleEvents(client, ai, botToken, socketClient)
 
 	if err := socketClient.Run(); err != nil {
 		log.Fatalf("Socket mode error: %v", err)

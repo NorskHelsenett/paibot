@@ -72,7 +72,7 @@ func fetchThreadContext(client *slack.Client, channel, threadTS string) (string,
 	return sb.String(), nil
 }
 
-func handleAppMention(client *slack.Client, ai *AIClient, event *slackevents.AppMentionEvent) {
+func handleAppMention(client *slack.Client, ai *AIClient, botToken string, event *slackevents.AppMentionEvent) {
 	eid := nextEventID()
 
 	// Strip the bot mention prefix (e.g. "<@U12345> ")
@@ -93,6 +93,16 @@ func handleAppMention(client *slack.Client, ai *AIClient, event *slackevents.App
 
 	react(client, true, "thinking_face", event.Channel, event.TimeStamp)
 
+	// Fetch files attached to this message (AppMentionEvent doesn't include them directly)
+	var files []FileAttachment
+	slackFiles, fetchErr := fetchMessageFiles(client, event.Channel, event.TimeStamp, event.ThreadTimeStamp)
+	if fetchErr != nil {
+		logVerbose("[%s] failed to fetch message files: %v", eid, fetchErr)
+	} else if len(slackFiles) > 0 {
+		files = extractFiles(botToken, slackFiles)
+		log.Printf("[%s] extracted %d file(s) from mention", eid, len(files))
+	}
+
 	var (
 		reply string
 		err   error
@@ -101,12 +111,24 @@ func handleAppMention(client *slack.Client, ai *AIClient, event *slackevents.App
 		threadContext, fetchErr := fetchThreadContext(client, event.Channel, threadTS)
 		if fetchErr != nil {
 			logVerbose("[%s] failed to fetch thread context: %v", eid, fetchErr)
-			reply, err = ai.Chat(context.Background(), text)
+			if len(files) > 0 {
+				reply, err = ai.ChatWithFiles(context.Background(), text, files)
+			} else {
+				reply, err = ai.Chat(context.Background(), text)
+			}
 		} else {
-			reply, err = ai.ChatWithThread(context.Background(), text, threadContext)
+			if len(files) > 0 {
+				reply, err = ai.ChatWithThreadAndFiles(context.Background(), text, threadContext, files)
+			} else {
+				reply, err = ai.ChatWithThread(context.Background(), text, threadContext)
+			}
 		}
 	} else {
-		reply, err = ai.Chat(context.Background(), text)
+		if len(files) > 0 {
+			reply, err = ai.ChatWithFiles(context.Background(), text, files)
+		} else {
+			reply, err = ai.Chat(context.Background(), text)
+		}
 	}
 
 	if err != nil {
@@ -129,16 +151,33 @@ func handleAppMention(client *slack.Client, ai *AIClient, event *slackevents.App
 	log.Printf("[%s] answered", eid)
 }
 
-func handleDM(client *slack.Client, ai *AIClient, event *slackevents.MessageEvent) {
+func handleDM(client *slack.Client, ai *AIClient, botToken string, event *slackevents.MessageEvent) {
 	eid := nextEventID()
 
-	if event.BotID != "" || event.SubType != "" {
+	if event.BotID != "" {
+		return
+	}
+	// Allow "file_share" subtype (user uploaded a file); skip other subtypes.
+	if event.SubType != "" && event.SubType != "file_share" {
 		return
 	}
 
 	text := strings.TrimSpace(event.Text)
-	if text == "" {
+
+	// Extract files from the message
+	var files []FileAttachment
+	if event.Message != nil && len(event.Message.Files) > 0 {
+		files = extractFiles(botToken, event.Message.Files)
+		log.Printf("[%s] extracted %d file(s) from DM", eid, len(files))
+	}
+
+	// If there's no text and no files, nothing to do
+	if text == "" && len(files) == 0 {
 		return
+	}
+	// Default prompt when user sends only files without text
+	if text == "" {
+		text = "Please analyze the attached file(s)."
 	}
 
 	threadTS := event.ThreadTimeStamp
@@ -156,12 +195,24 @@ func handleDM(client *slack.Client, ai *AIClient, event *slackevents.MessageEven
 		threadContext, fetchErr := fetchThreadContext(client, event.Channel, threadTS)
 		if fetchErr != nil {
 			logVerbose("[%s] failed to fetch DM thread context: %v", eid, fetchErr)
-			reply, err = ai.Chat(context.Background(), text)
+			if len(files) > 0 {
+				reply, err = ai.ChatWithFiles(context.Background(), text, files)
+			} else {
+				reply, err = ai.Chat(context.Background(), text)
+			}
 		} else {
-			reply, err = ai.ChatWithThread(context.Background(), text, threadContext)
+			if len(files) > 0 {
+				reply, err = ai.ChatWithThreadAndFiles(context.Background(), text, threadContext, files)
+			} else {
+				reply, err = ai.ChatWithThread(context.Background(), text, threadContext)
+			}
 		}
 	} else {
-		reply, err = ai.Chat(context.Background(), text)
+		if len(files) > 0 {
+			reply, err = ai.ChatWithFiles(context.Background(), text, files)
+		} else {
+			reply, err = ai.Chat(context.Background(), text)
+		}
 	}
 	if err != nil {
 		reactError(client, eid, "error from AI", event.Channel, event.TimeStamp, err)
@@ -183,7 +234,7 @@ func handleDM(client *slack.Client, ai *AIClient, event *slackevents.MessageEven
 	log.Printf("[%s] answered", eid)
 }
 
-func handleEvents(client *slack.Client, ai *AIClient, socketClient *socketmode.Client) {
+func handleEvents(client *slack.Client, ai *AIClient, botToken string, socketClient *socketmode.Client) {
 	for evt := range socketClient.Events {
 		switch evt.Type {
 		case socketmode.EventTypeConnecting:
@@ -213,12 +264,12 @@ func handleEvents(client *slack.Client, ai *AIClient, socketClient *socketmode.C
 			case *slackevents.AppMentionEvent:
 				// All @mentions (channel or thread) are handled here.
 				// This ensures the bot only responds in threads when explicitly mentioned.
-				go handleAppMention(client, ai, ev)
+				go handleAppMention(client, ai, botToken, ev)
 			case *slackevents.MessageEvent:
 				logVerbose("message event: channel=%s subtype=%q user=%q threadTS=%q",
 					ev.Channel, ev.SubType, ev.User, ev.ThreadTimeStamp)
 				if strings.HasPrefix(ev.Channel, "D") {
-					go handleDM(client, ai, ev)
+					go handleDM(client, ai, botToken, ev)
 				}
 				// Thread messages are intentionally ignored here; app_mention handles @mentions.
 			default:
