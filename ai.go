@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"sync"
 
 	"github.com/openai/openai-go"
 	"github.com/openai/openai-go/option"
@@ -10,10 +9,8 @@ import (
 )
 
 type AIClient struct {
-	client  openai.Client
-	config  *BotConfig
-	history map[string][]openai.ChatCompletionMessageParamUnion
-	mu      sync.RWMutex
+	client openai.Client
+	config *BotConfig
 }
 
 func NewAIClient(baseURL, apiKey string, config *BotConfig) *AIClient {
@@ -22,64 +19,47 @@ func NewAIClient(baseURL, apiKey string, config *BotConfig) *AIClient {
 			option.WithAPIKey(apiKey),
 			option.WithBaseURL(baseURL),
 		),
-		config:  config,
-		history: make(map[string][]openai.ChatCompletionMessageParamUnion),
+		config: config,
 	}
 }
 
-func (a *AIClient) callAI(ctx context.Context, messages []openai.ChatCompletionMessageParamUnion) (string, error) {
-	params := openai.ChatCompletionNewParams{
+func (a *AIClient) sendMessage(ctx context.Context, system string, messages []openai.ChatCompletionMessageParamUnion) (string, error) {
+	all := make([]openai.ChatCompletionMessageParamUnion, 0, len(messages)+1)
+	if system != "" {
+		all = append(all, openai.SystemMessage(system))
+	}
+	all = append(all, messages...)
+
+	p := openai.ChatCompletionNewParams{
 		Model:    openai.ChatModel(a.config.Model),
-		Messages: messages,
+		Messages: all,
 	}
 	if a.config.Temp != 0 {
-		params.Temperature = param.NewOpt(float64(a.config.Temp))
+		p.Temperature = param.NewOpt(float64(a.config.Temp))
 	}
 	if a.config.MaxTokens > 0 {
-		params.MaxTokens = param.NewOpt(int64(a.config.MaxTokens))
+		p.MaxTokens = param.NewOpt(int64(a.config.MaxTokens))
 	}
 
-	resp, err := a.client.Chat.Completions.New(ctx, params)
+	resp, err := a.client.Chat.Completions.New(ctx, p)
 	if err != nil {
 		return "", err
 	}
 	return resp.Choices[0].Message.Content, nil
 }
 
-// chat is the shared implementation for Chat and ChatWithThread.
-// systemPrompt is used to seed history on the first message.
-func (a *AIClient) chat(ctx context.Context, conversationID, userMessage, systemPrompt string) (string, error) {
-	a.mu.Lock()
-	if _, exists := a.history[conversationID]; !exists && systemPrompt != "" {
-		a.history[conversationID] = []openai.ChatCompletionMessageParamUnion{openai.SystemMessage(systemPrompt)}
-	}
-	a.history[conversationID] = append(a.history[conversationID], openai.UserMessage(userMessage))
-	messages := append([]openai.ChatCompletionMessageParamUnion{}, a.history[conversationID]...)
-	a.mu.Unlock()
-
-	reply, err := a.callAI(ctx, messages)
-	if err != nil {
-		return "", err
-	}
-
-	a.mu.Lock()
-	a.history[conversationID] = append(a.history[conversationID], openai.AssistantMessage(reply))
-	a.mu.Unlock()
-
-	return reply, nil
+// Chat answers a single message with no prior context (e.g. a fresh DM).
+func (a *AIClient) Chat(ctx context.Context, userMessage string) (string, error) {
+	return a.sendMessage(ctx, a.config.Prompts.Chat, []openai.ChatCompletionMessageParamUnion{
+		openai.UserMessage(userMessage),
+	})
 }
 
-func (a *AIClient) Chat(ctx context.Context, conversationID, userMessage string) (string, error) {
-	return a.chat(ctx, conversationID, userMessage, a.config.Prompts.Chat)
-}
-
-func (a *AIClient) ChatWithThread(ctx context.Context, conversationID, userMessage, threadContext string) (string, error) {
-	return a.chat(ctx, conversationID, userMessage, a.config.Prompts.Thread+"\n\n"+threadContext)
-}
-
-func (a *AIClient) Summarize(ctx context.Context, threadMessages string) (string, error) {
-	return a.callAI(ctx, []openai.ChatCompletionMessageParamUnion{
-		openai.SystemMessage(a.config.Prompts.Summarize),
-		openai.UserMessage(threadMessages),
+// ChatWithThread answers using the full Slack thread fetched fresh on every call as context.
+// No in-memory history is kept — Slack is the source of truth.
+func (a *AIClient) ChatWithThread(ctx context.Context, userMessage, threadContext string) (string, error) {
+	return a.sendMessage(ctx, a.config.Prompts.Thread, []openai.ChatCompletionMessageParamUnion{
+		openai.UserMessage(threadContext),
+		openai.UserMessage(userMessage),
 	})
 }

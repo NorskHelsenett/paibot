@@ -13,10 +13,9 @@ type BotConfig struct {
 	Model     string  `yaml:"model"`
 	Temp      float32 `yaml:"temperature"`
 	MaxTokens int     `yaml:"max_tokens"`
-	Prompts   struct {
-		Chat      string `yaml:"chat"`
-		Thread    string `yaml:"thread"`
-		Summarize string `yaml:"summarize"`
+	Prompts struct {
+		Chat   string `yaml:"chat"`
+		Thread string `yaml:"thread"`
 	} `yaml:"prompts"`
 }
 
@@ -37,7 +36,6 @@ func LoadConfig(path string) (*BotConfig, error) {
 
 	cfg.Prompts.Chat = strings.TrimSpace(cfg.Prompts.Chat)
 	cfg.Prompts.Thread = strings.TrimSpace(cfg.Prompts.Thread)
-	cfg.Prompts.Summarize = strings.TrimSpace(cfg.Prompts.Summarize)
 
 	if cfg.Model == "" {
 		return nil, fmt.Errorf("config: model is required")

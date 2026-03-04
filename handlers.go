@@ -81,8 +81,7 @@ func handleAppMention(client *slack.Client, ai *AIClient, event *slackevents.App
 		threadTS = event.TimeStamp
 	}
 
-	conversationID := event.Channel + ":" + threadTS
-	log.Printf("[%s] mention from user=%s channel=%s — forwarding to AI", eid, event.User, conversationID)
+	log.Printf("[%s] mention from user=%s channel=%s:%s — forwarding to AI", eid, event.User, event.Channel, threadTS)
 
 	react(client, true, "thinking_face", event.Channel, event.TimeStamp)
 
@@ -95,9 +94,9 @@ func handleAppMention(client *slack.Client, ai *AIClient, event *slackevents.App
 		if fetchErr != nil {
 			logVerbose("[%s] failed to fetch thread context: %v", eid, fetchErr)
 		}
-		reply, err = ai.ChatWithThread(context.Background(), conversationID, text, threadContext)
+		reply, err = ai.ChatWithThread(context.Background(), text, threadContext)
 	} else {
-		reply, err = ai.Chat(context.Background(), conversationID, text)
+		reply, err = ai.Chat(context.Background(), text)
 	}
 
 	if err != nil {
@@ -136,10 +135,21 @@ func handleDM(client *slack.Client, ai *AIClient, event *slackevents.MessageEven
 		threadTS = event.TimeStamp
 	}
 
-	conversationID := event.Channel + ":" + threadTS
 	log.Printf("[%s] DM from user=%s — forwarding to AI", eid, event.User)
 
-	reply, err := ai.Chat(context.Background(), conversationID, text)
+	react(client, true, "thinking_face", event.Channel, event.TimeStamp)
+
+	var reply string
+	var err error
+	if event.ThreadTimeStamp != "" {
+		threadContext, fetchErr := fetchThreadContext(client, event.Channel, threadTS)
+		if fetchErr != nil {
+			logVerbose("[%s] failed to fetch DM thread context: %v", eid, fetchErr)
+		}
+		reply, err = ai.ChatWithThread(context.Background(), text, threadContext)
+	} else {
+		reply, err = ai.Chat(context.Background(), text)
+	}
 	if err != nil {
 		log.Printf("[%s] error from AI: %v", eid, err)
 		reply = "Sorry, I encountered an error. Please try again."
@@ -152,6 +162,9 @@ func handleDM(client *slack.Client, ai *AIClient, event *slackevents.MessageEven
 	); err != nil {
 		log.Printf("[%s] failed to post reply: %v", eid, err)
 	}
+
+	react(client, false, "thinking_face", event.Channel, event.TimeStamp)
+	react(client, true, "white_check_mark", event.Channel, event.TimeStamp)
 
 	log.Printf("[%s] answered", eid)
 }
