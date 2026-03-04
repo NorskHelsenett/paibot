@@ -38,15 +38,16 @@ func reactError(client *slack.Client, eid, msg, channel, ts string, err error) {
 }
 
 // fetchThreadContext retrieves all messages in a thread and formats them for AI context.
-// Files from the most recent prior message that has files are downloaded and inlined.
+// Files from the most recent prior message that has files are returned as FileAttachments
+// so they can be forwarded to the AI as proper content parts (including images).
 // Older file messages are noted by name only. Files from currentTS are skipped (handled by caller).
-func fetchThreadContext(client *slack.Client, botToken, channel, threadTS, currentTS string) (string, error) {
+func fetchThreadContext(client *slack.Client, botToken, channel, threadTS, currentTS string) (string, []extract.FileAttachment, error) {
 	msgs, _, _, err := client.GetConversationReplies(&slack.GetConversationRepliesParameters{
 		ChannelID: channel,
 		Timestamp: threadTS,
 	})
 	if err != nil {
-		return "", fmt.Errorf("conversations.replies: %w", err)
+		return "", nil, fmt.Errorf("conversations.replies: %w", err)
 	}
 
 	// Find the most recent prior message that has files — only that one is downloaded.
@@ -59,6 +60,7 @@ func fetchThreadContext(client *slack.Client, botToken, channel, threadTS, curre
 	}
 
 	var sb strings.Builder
+	var threadFiles []extract.FileAttachment
 	for _, m := range msgs {
 		user := m.User
 		if user == "" {
@@ -80,11 +82,14 @@ func fetchThreadContext(client *slack.Client, botToken, channel, threadTS, curre
 			continue
 		}
 
-		for _, f := range extract.ExtractFiles(botToken, m.Files) {
-			sb.WriteString(extract.ToInlineText(f))
+		// Download the latest file message and return as FileAttachments so the AI
+		// receives proper content parts (images as ImageContentPart, etc.).
+		threadFiles = extract.ExtractFiles(botToken, m.Files)
+		for _, f := range threadFiles {
+			sb.WriteString(fmt.Sprintf("[Attached file: %s]\n", f.Name))
 		}
 	}
-	return sb.String(), nil
+	return sb.String(), threadFiles, nil
 }
 
 func handleAppMention(client *slack.Client, aiClient *ai.Client, botToken string, event *slackevents.AppMentionEvent) {
@@ -192,26 +197,31 @@ func handleDM(client *slack.Client, aiClient *ai.Client, botToken string, event 
 // It also handles the fallback if fetching thread context fails.
 func callAI(aiClient *ai.Client, slackClient *slack.Client, botToken, eid, channel, threadTS, currentTS string, inThread bool, text string, files []extract.FileAttachment) (string, error) {
 	ctx := context.Background()
-	hasFiles := len(files) > 0
 
 	if !inThread {
-		if hasFiles {
+		if len(files) > 0 {
 			return aiClient.ChatWithFiles(ctx, text, files)
 		}
 		return aiClient.Chat(ctx, text)
 	}
 
-	threadContext, err := fetchThreadContext(slackClient, botToken, channel, threadTS, currentTS)
+	threadContext, threadFiles, err := fetchThreadContext(slackClient, botToken, channel, threadTS, currentTS)
 	if err != nil {
 		logutil.Logf("[%s] failed to fetch thread context: %v", eid, err)
-		if hasFiles {
+		if len(files) > 0 {
 			return aiClient.ChatWithFiles(ctx, text, files)
 		}
 		return aiClient.Chat(ctx, text)
 	}
 
-	if hasFiles {
-		return aiClient.ChatWithThreadAndFiles(ctx, text, threadContext, files)
+	// Merge files from the current message with the latest file from the thread,
+	// so follow-up questions always forward the last uploaded file to the AI.
+	allFiles := append(files, threadFiles...)
+	if len(allFiles) > 0 {
+		if len(allFiles) > len(files) {
+			log.Printf("[%s] forwarding %d thread file(s) to AI for follow-up", eid, len(threadFiles))
+		}
+		return aiClient.ChatWithThreadAndFiles(ctx, text, threadContext, allFiles)
 	}
 	return aiClient.ChatWithThread(ctx, text, threadContext)
 }
