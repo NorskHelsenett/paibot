@@ -1,4 +1,4 @@
-package main
+package extract
 
 import (
 	"encoding/base64"
@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/jonasbg/paibot/internal/logutil"
 	"github.com/openai/openai-go"
 	"github.com/slack-go/slack"
 )
@@ -22,8 +23,8 @@ type FileAttachment struct {
 // maxFileSize is the maximum file size we'll download (20 MB).
 const maxFileSize = 20 * 1024 * 1024
 
-// downloadSlackFile downloads a file from Slack using the bot token for auth.
-func downloadSlackFile(botToken, url string) ([]byte, error) {
+// DownloadFile downloads a file from Slack using the bot token for auth.
+func DownloadFile(botToken, url string) ([]byte, error) {
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
@@ -50,8 +51,8 @@ func downloadSlackFile(botToken, url string) ([]byte, error) {
 	return data, nil
 }
 
-// extractFiles downloads Slack files and returns them as FileAttachments.
-func extractFiles(botToken string, files []slack.File) []FileAttachment {
+// ExtractFiles downloads Slack files and returns them as FileAttachments.
+func ExtractFiles(botToken string, files []slack.File) []FileAttachment {
 	var attachments []FileAttachment
 	for _, f := range files {
 		url := f.URLPrivateDownload
@@ -59,11 +60,11 @@ func extractFiles(botToken string, files []slack.File) []FileAttachment {
 			url = f.URLPrivate
 		}
 		if url == "" {
-			logVerbose("skipping file %s: no download URL", f.ID)
+			logutil.Logf("skipping file %s: no download URL", f.ID)
 			continue
 		}
 
-		data, err := downloadSlackFile(botToken, url)
+		data, err := DownloadFile(botToken, url)
 		if err != nil {
 			log.Printf("failed to download file %s (%s): %v", f.ID, f.Name, err)
 			continue
@@ -74,14 +75,14 @@ func extractFiles(botToken string, files []slack.File) []FileAttachment {
 			MimeType: f.Mimetype,
 			Data:     data,
 		})
-		logVerbose("downloaded file %s (%s, %d bytes, %s)", f.ID, f.Name, len(data), f.Mimetype)
+		logutil.Logf("downloaded file %s (%s, %d bytes, %s)", f.ID, f.Name, len(data), f.Mimetype)
 	}
 	return attachments
 }
 
-// fetchMessageFiles retrieves files from a specific Slack message using the conversations API.
+// FetchMessageFiles retrieves files from a specific Slack message using the conversations API.
 // This is needed for AppMentionEvent which doesn't include file data directly.
-func fetchMessageFiles(client *slack.Client, channel, ts, threadTS string) ([]slack.File, error) {
+func FetchMessageFiles(client *slack.Client, channel, ts, threadTS string) ([]slack.File, error) {
 	lookupTS := threadTS
 	if lookupTS == "" {
 		lookupTS = ts
@@ -101,37 +102,26 @@ func fetchMessageFiles(client *slack.Client, channel, ts, threadTS string) ([]sl
 	return nil, nil
 }
 
-// isImageMimeType returns true if the MIME type is an image type.
 func isImageMimeType(mime string) bool {
 	return strings.HasPrefix(mime, "image/")
 }
 
-// isTextLikeMimeType returns true for MIME types that should be sent as inline text.
 func isTextLikeMimeType(mime string) bool {
 	if strings.HasPrefix(mime, "text/") {
 		return true
 	}
-	textTypes := []string{
-		"application/json",
-		"application/xml",
-		"application/javascript",
-		"application/x-yaml",
-		"application/yaml",
-		"application/toml",
-		"application/x-sh",
-	}
-	for _, t := range textTypes {
-		if mime == t {
-			return true
-		}
+	switch mime {
+	case "application/json", "application/xml", "application/javascript",
+		"application/x-yaml", "application/yaml", "application/toml", "application/x-sh":
+		return true
 	}
 	return false
 }
 
-// fileToInlineText converts a FileAttachment to a plain-text string for embedding in
+// ToInlineText converts a FileAttachment to a plain-text string for embedding in
 // thread context. Images are noted by name only (no base64). Extractable documents
 // have their text inlined. Unsupported binaries get a size note.
-func fileToInlineText(f FileAttachment) string {
+func ToInlineText(f FileAttachment) string {
 	switch {
 	case isImageMimeType(f.MimeType):
 		return fmt.Sprintf("[Attached image: %s]\n", f.Name)
@@ -142,25 +132,25 @@ func fileToInlineText(f FileAttachment) string {
 		if err != nil {
 			return fmt.Sprintf("[Attached file: %s — could not extract text]\n", f.Name)
 		}
-		logVerbose("extracted %d chars of text from %s", len(text), f.Name)
+		logutil.Logf("extracted %d chars of text from %s", len(text), f.Name)
 		return fmt.Sprintf("[File: %s]\n%s\n", f.Name, text)
 	case isPDFMimeType(f.MimeType):
 		text, err := extractTextFromPDF(f.Data)
 		if err != nil {
 			return fmt.Sprintf("[Attached file: %s — could not extract text]\n", f.Name)
 		}
-		logVerbose("extracted %d chars of text from %s", len(text), f.Name)
+		logutil.Logf("extracted %d chars of text from %s", len(text), f.Name)
 		return fmt.Sprintf("[File: %s]\n%s\n", f.Name, text)
 	default:
 		return fmt.Sprintf("[Attached file: %s (type: %s, %d bytes)]\n", f.Name, f.MimeType, len(f.Data))
 	}
 }
 
-// filesToContentParts converts FileAttachments to openai content parts.
+// ToContentParts converts FileAttachments to openai content parts.
 // Images become ImageContentPart with base64 data URLs.
 // Text-like files, Office documents, and PDFs have text extracted and sent inline.
 // Other binary files are noted as text so the AI knows they were attached.
-func filesToContentParts(files []FileAttachment) []openai.ChatCompletionContentPartUnionParam {
+func ToContentParts(files []FileAttachment) []openai.ChatCompletionContentPartUnionParam {
 	var parts []openai.ChatCompletionContentPartUnionParam
 	for _, f := range files {
 		if isImageMimeType(f.MimeType) {
@@ -170,11 +160,10 @@ func filesToContentParts(files []FileAttachment) []openai.ChatCompletionContentP
 				URL: dataURL,
 			}))
 		} else {
-			text := fileToInlineText(f)
 			if !isTextLikeMimeType(f.MimeType) && !isOfficeDocMimeType(f.MimeType) && !isPDFMimeType(f.MimeType) {
 				log.Printf("unsupported file type for AI: %s (%s)", f.Name, f.MimeType)
 			}
-			parts = append(parts, openai.TextContentPart(text))
+			parts = append(parts, openai.TextContentPart(ToInlineText(f)))
 		}
 	}
 	return parts

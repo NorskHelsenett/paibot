@@ -1,19 +1,18 @@
-package main
+package extract
 
 import (
 	"bytes"
 	"fmt"
 	"strings"
 
+	"github.com/jonasbg/paibot/internal/logutil"
 	"github.com/ledongthuc/pdf"
 )
 
-// isPDFMimeType returns true if the MIME type is a PDF.
 func isPDFMimeType(mime string) bool {
 	return mime == "application/pdf"
 }
 
-// extractTextFromPDF extracts plain text content from a PDF file.
 func extractTextFromPDF(data []byte) (string, error) {
 	r, err := pdf.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
@@ -29,7 +28,7 @@ func extractTextFromPDF(data []byte) (string, error) {
 		}
 		text, err := p.GetPlainText(nil)
 		if err != nil {
-			logVerbose("failed to extract text from PDF page %d: %v", i, err)
+			logutil.Logf("failed to extract text from PDF page %d: %v", i, err)
 			continue
 		}
 		text = strings.TrimSpace(text)

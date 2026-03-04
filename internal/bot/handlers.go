@@ -1,4 +1,4 @@
-package main
+package bot
 
 import (
 	"context"
@@ -8,29 +8,20 @@ import (
 	"log"
 	"strings"
 
+	"github.com/jonasbg/paibot/internal/ai"
+	"github.com/jonasbg/paibot/internal/extract"
+	"github.com/jonasbg/paibot/internal/logutil"
 	"github.com/slack-go/slack"
 	"github.com/slack-go/slack/slackevents"
 	"github.com/slack-go/slack/socketmode"
 )
 
-// verboseLogging controls debug-level log output. Set via --verbose flag or VERBOSE_LOGS env.
-var verboseLogging bool
-
-// nextEventID returns a random 6-char hex event ID (e.g. "a3f7b2").
 func nextEventID() string {
 	b := make([]byte, 3)
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
 }
 
-// logVerbose logs only when verbose mode is enabled.
-func logVerbose(format string, args ...any) {
-	if verboseLogging {
-		log.Printf(format, args...)
-	}
-}
-
-// react adds or removes a reaction emoji on a message.
 func react(client *slack.Client, add bool, emoji, channel, ts string) {
 	ref := slack.ItemRef{Channel: channel, Timestamp: ts}
 	if add {
@@ -40,8 +31,6 @@ func react(client *slack.Client, add bool, emoji, channel, ts string) {
 	}
 }
 
-// reactError replaces the thinking reaction with :usererror: and returns false,
-// intended to be used as: if reactError(...) { return }.
 func reactError(client *slack.Client, eid, msg, channel, ts string, err error) {
 	log.Printf("[%s] %s: %v", eid, msg, err)
 	react(client, false, "thinking_face", channel, ts)
@@ -49,9 +38,8 @@ func reactError(client *slack.Client, eid, msg, channel, ts string, err error) {
 }
 
 // fetchThreadContext retrieves all messages in a thread and formats them for AI context.
-// Files from earlier messages are downloaded and their text content is included inline,
-// so the AI has access to previously shared documents without reprocessing them separately.
-// Files from currentTS are skipped since they are handled separately by the caller.
+// Files from the most recent prior message that has files are downloaded and inlined.
+// Older file messages are noted by name only. Files from currentTS are skipped (handled by caller).
 func fetchThreadContext(client *slack.Client, botToken, channel, threadTS, currentTS string) (string, error) {
 	msgs, _, _, err := client.GetConversationReplies(&slack.GetConversationRepliesParameters{
 		ChannelID: channel,
@@ -62,7 +50,6 @@ func fetchThreadContext(client *slack.Client, botToken, channel, threadTS, curre
 	}
 
 	// Find the most recent prior message that has files — only that one is downloaded.
-	// Earlier file messages are noted by name only to keep context concise.
 	latestFileTS := ""
 	for i := len(msgs) - 1; i >= 0; i-- {
 		if msgs[i].Timestamp != currentTS && len(msgs[i].Files) > 0 {
@@ -87,26 +74,22 @@ func fetchThreadContext(client *slack.Client, botToken, channel, threadTS, curre
 		}
 
 		if m.Timestamp != latestFileTS {
-			// Older file messages: just note their names, don't download.
 			for _, f := range m.Files {
 				sb.WriteString(fmt.Sprintf("[Earlier attached file: %s]\n", f.Name))
 			}
 			continue
 		}
 
-		// Latest file message: download and inline content.
-		attachments := extractFiles(botToken, m.Files)
-		for _, f := range attachments {
-			sb.WriteString(fileToInlineText(f))
+		for _, f := range extract.ExtractFiles(botToken, m.Files) {
+			sb.WriteString(extract.ToInlineText(f))
 		}
 	}
 	return sb.String(), nil
 }
 
-func handleAppMention(client *slack.Client, ai *AIClient, botToken string, event *slackevents.AppMentionEvent) {
+func handleAppMention(client *slack.Client, aiClient *ai.Client, botToken string, event *slackevents.AppMentionEvent) {
 	eid := nextEventID()
 
-	// Strip the bot mention prefix (e.g. "<@U12345> ")
 	text := strings.TrimSpace(event.Text)
 	if idx := strings.Index(text, ">"); idx != -1 {
 		text = strings.TrimSpace(text[idx+1:])
@@ -121,47 +104,18 @@ func handleAppMention(client *slack.Client, ai *AIClient, botToken string, event
 	}
 
 	log.Printf("[%s] mention from user=%s channel=%s:%s — forwarding to AI", eid, event.User, event.Channel, threadTS)
-
 	react(client, true, "thinking_face", event.Channel, event.TimeStamp)
 
-	// Fetch files attached to this message (AppMentionEvent doesn't include them directly)
-	var files []FileAttachment
-	slackFiles, fetchErr := fetchMessageFiles(client, event.Channel, event.TimeStamp, event.ThreadTimeStamp)
+	var files []extract.FileAttachment
+	slackFiles, fetchErr := extract.FetchMessageFiles(client, event.Channel, event.TimeStamp, event.ThreadTimeStamp)
 	if fetchErr != nil {
-		logVerbose("[%s] failed to fetch message files: %v", eid, fetchErr)
+		logutil.Logf("[%s] failed to fetch message files: %v", eid, fetchErr)
 	} else if len(slackFiles) > 0 {
-		files = extractFiles(botToken, slackFiles)
+		files = extract.ExtractFiles(botToken, slackFiles)
 		log.Printf("[%s] extracted %d file(s) from mention", eid, len(files))
 	}
 
-	var (
-		reply string
-		err   error
-	)
-	if event.ThreadTimeStamp != "" {
-		threadContext, fetchErr := fetchThreadContext(client, botToken, event.Channel, threadTS, event.TimeStamp)
-		if fetchErr != nil {
-			logVerbose("[%s] failed to fetch thread context: %v", eid, fetchErr)
-			if len(files) > 0 {
-				reply, err = ai.ChatWithFiles(context.Background(), text, files)
-			} else {
-				reply, err = ai.Chat(context.Background(), text)
-			}
-		} else {
-			if len(files) > 0 {
-				reply, err = ai.ChatWithThreadAndFiles(context.Background(), text, threadContext, files)
-			} else {
-				reply, err = ai.ChatWithThread(context.Background(), text, threadContext)
-			}
-		}
-	} else {
-		if len(files) > 0 {
-			reply, err = ai.ChatWithFiles(context.Background(), text, files)
-		} else {
-			reply, err = ai.Chat(context.Background(), text)
-		}
-	}
-
+	reply, err := callAI(aiClient, client, botToken, eid, event.Channel, threadTS, event.TimeStamp, event.ThreadTimeStamp != "", text, files)
 	if err != nil {
 		reactError(client, eid, "error from AI", event.Channel, event.TimeStamp, err)
 		return
@@ -178,35 +132,30 @@ func handleAppMention(client *slack.Client, ai *AIClient, botToken string, event
 
 	react(client, false, "thinking_face", event.Channel, event.TimeStamp)
 	react(client, true, "white_check_mark", event.Channel, event.TimeStamp)
-
 	log.Printf("[%s] answered", eid)
 }
 
-func handleDM(client *slack.Client, ai *AIClient, botToken string, event *slackevents.MessageEvent) {
+func handleDM(client *slack.Client, aiClient *ai.Client, botToken string, event *slackevents.MessageEvent) {
 	eid := nextEventID()
 
 	if event.BotID != "" {
 		return
 	}
-	// Allow "file_share" subtype (user uploaded a file); skip other subtypes.
 	if event.SubType != "" && event.SubType != "file_share" {
 		return
 	}
 
 	text := strings.TrimSpace(event.Text)
 
-	// Extract files from the message
-	var files []FileAttachment
+	var files []extract.FileAttachment
 	if event.Message != nil && len(event.Message.Files) > 0 {
-		files = extractFiles(botToken, event.Message.Files)
+		files = extract.ExtractFiles(botToken, event.Message.Files)
 		log.Printf("[%s] extracted %d file(s) from DM", eid, len(files))
 	}
 
-	// If there's no text and no files, nothing to do
 	if text == "" && len(files) == 0 {
 		return
 	}
-	// Default prompt when user sends only files without text
 	if text == "" {
 		text = "Please analyze the attached file(s)."
 	}
@@ -217,34 +166,9 @@ func handleDM(client *slack.Client, ai *AIClient, botToken string, event *slacke
 	}
 
 	log.Printf("[%s] DM from user=%s — forwarding to AI", eid, event.User)
-
 	react(client, true, "thinking_face", event.Channel, event.TimeStamp)
 
-	var reply string
-	var err error
-	if event.ThreadTimeStamp != "" {
-		threadContext, fetchErr := fetchThreadContext(client, botToken, event.Channel, threadTS, event.TimeStamp)
-		if fetchErr != nil {
-			logVerbose("[%s] failed to fetch DM thread context: %v", eid, fetchErr)
-			if len(files) > 0 {
-				reply, err = ai.ChatWithFiles(context.Background(), text, files)
-			} else {
-				reply, err = ai.Chat(context.Background(), text)
-			}
-		} else {
-			if len(files) > 0 {
-				reply, err = ai.ChatWithThreadAndFiles(context.Background(), text, threadContext, files)
-			} else {
-				reply, err = ai.ChatWithThread(context.Background(), text, threadContext)
-			}
-		}
-	} else {
-		if len(files) > 0 {
-			reply, err = ai.ChatWithFiles(context.Background(), text, files)
-		} else {
-			reply, err = ai.Chat(context.Background(), text)
-		}
-	}
+	reply, err := callAI(aiClient, client, botToken, eid, event.Channel, threadTS, event.TimeStamp, event.ThreadTimeStamp != "", text, files)
 	if err != nil {
 		reactError(client, eid, "error from AI", event.Channel, event.TimeStamp, err)
 		return
@@ -261,11 +185,39 @@ func handleDM(client *slack.Client, ai *AIClient, botToken string, event *slacke
 
 	react(client, false, "thinking_face", event.Channel, event.TimeStamp)
 	react(client, true, "white_check_mark", event.Channel, event.TimeStamp)
-
 	log.Printf("[%s] answered", eid)
 }
 
-func handleEvents(client *slack.Client, ai *AIClient, botToken string, socketClient *socketmode.Client) {
+// callAI dispatches to the right AI method based on whether we have a thread and/or files.
+// It also handles the fallback if fetching thread context fails.
+func callAI(aiClient *ai.Client, slackClient *slack.Client, botToken, eid, channel, threadTS, currentTS string, inThread bool, text string, files []extract.FileAttachment) (string, error) {
+	ctx := context.Background()
+	hasFiles := len(files) > 0
+
+	if !inThread {
+		if hasFiles {
+			return aiClient.ChatWithFiles(ctx, text, files)
+		}
+		return aiClient.Chat(ctx, text)
+	}
+
+	threadContext, err := fetchThreadContext(slackClient, botToken, channel, threadTS, currentTS)
+	if err != nil {
+		logutil.Logf("[%s] failed to fetch thread context: %v", eid, err)
+		if hasFiles {
+			return aiClient.ChatWithFiles(ctx, text, files)
+		}
+		return aiClient.Chat(ctx, text)
+	}
+
+	if hasFiles {
+		return aiClient.ChatWithThreadAndFiles(ctx, text, threadContext, files)
+	}
+	return aiClient.ChatWithThread(ctx, text, threadContext)
+}
+
+// HandleEvents is the main event loop consuming socket mode events.
+func HandleEvents(client *slack.Client, aiClient *ai.Client, botToken string, socketClient *socketmode.Client) {
 	for evt := range socketClient.Events {
 		switch evt.Type {
 		case socketmode.EventTypeConnecting:
@@ -285,7 +237,7 @@ func handleEvents(client *slack.Client, ai *AIClient, botToken string, socketCli
 				continue
 			}
 			socketClient.Ack(*evt.Request)
-			logVerbose("Event received: type=%s inner=%s", eventsAPIEvent.Type, eventsAPIEvent.InnerEvent.Type)
+			logutil.Logf("Event received: type=%s inner=%s", eventsAPIEvent.Type, eventsAPIEvent.InnerEvent.Type)
 
 			if eventsAPIEvent.Type != slackevents.CallbackEvent {
 				continue
@@ -293,18 +245,15 @@ func handleEvents(client *slack.Client, ai *AIClient, botToken string, socketCli
 
 			switch ev := eventsAPIEvent.InnerEvent.Data.(type) {
 			case *slackevents.AppMentionEvent:
-				// All @mentions (channel or thread) are handled here.
-				// This ensures the bot only responds in threads when explicitly mentioned.
-				go handleAppMention(client, ai, botToken, ev)
+				go handleAppMention(client, aiClient, botToken, ev)
 			case *slackevents.MessageEvent:
-				logVerbose("message event: channel=%s subtype=%q user=%q threadTS=%q",
+				logutil.Logf("message event: channel=%s subtype=%q user=%q threadTS=%q",
 					ev.Channel, ev.SubType, ev.User, ev.ThreadTimeStamp)
 				if strings.HasPrefix(ev.Channel, "D") {
-					go handleDM(client, ai, botToken, ev)
+					go handleDM(client, aiClient, botToken, ev)
 				}
-				// Thread messages are intentionally ignored here; app_mention handles @mentions.
 			default:
-				logVerbose("unhandled inner event type: %T", eventsAPIEvent.InnerEvent.Data)
+				logutil.Logf("unhandled inner event type: %T", eventsAPIEvent.InnerEvent.Data)
 			}
 
 		case socketmode.EventTypeSlashCommand:
@@ -320,11 +269,11 @@ func handleEvents(client *slack.Client, ai *AIClient, botToken string, socketCli
 			if !ok {
 				continue
 			}
-			logVerbose("Interactive event: type=%s", callback.Type)
+			logutil.Logf("Interactive event: type=%s", callback.Type)
 			socketClient.Ack(*evt.Request)
 
 		default:
-			logVerbose("Unhandled event type: %s", evt.Type)
+			logutil.Logf("Unhandled event type: %s", evt.Type)
 		}
 	}
 }

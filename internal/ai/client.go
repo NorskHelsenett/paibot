@@ -1,30 +1,32 @@
-package main
+package ai
 
 import (
 	"context"
 	"fmt"
 
+	"github.com/jonasbg/paibot/internal/config"
+	"github.com/jonasbg/paibot/internal/extract"
 	"github.com/openai/openai-go"
 	"github.com/openai/openai-go/option"
 	"github.com/openai/openai-go/packages/param"
 )
 
-type AIClient struct {
+type Client struct {
 	client openai.Client
-	config *BotConfig
+	config *config.BotConfig
 }
 
-func NewAIClient(baseURL, apiKey string, config *BotConfig) *AIClient {
-	return &AIClient{
+func NewClient(baseURL, apiKey string, cfg *config.BotConfig) *Client {
+	return &Client{
 		client: openai.NewClient(
 			option.WithAPIKey(apiKey),
 			option.WithBaseURL(baseURL),
 		),
-		config: config,
+		config: cfg,
 	}
 }
 
-func (a *AIClient) sendMessage(ctx context.Context, system string, messages []openai.ChatCompletionMessageParamUnion) (string, error) {
+func (a *Client) sendMessage(ctx context.Context, system string, messages []openai.ChatCompletionMessageParamUnion) (string, error) {
 	all := make([]openai.ChatCompletionMessageParamUnion, 0, len(messages)+1)
 	if system != "" {
 		all = append(all, openai.SystemMessage(system))
@@ -53,15 +55,14 @@ func (a *AIClient) sendMessage(ctx context.Context, system string, messages []op
 }
 
 // Chat answers a single message with no prior context (e.g. a fresh DM).
-func (a *AIClient) Chat(ctx context.Context, userMessage string) (string, error) {
+func (a *Client) Chat(ctx context.Context, userMessage string) (string, error) {
 	return a.sendMessage(ctx, a.config.Prompts.Chat, []openai.ChatCompletionMessageParamUnion{
 		openai.UserMessage(userMessage),
 	})
 }
 
-// ChatWithThread answers using the full Slack thread fetched fresh on every call as context.
-// No in-memory history is kept — Slack is the source of truth.
-func (a *AIClient) ChatWithThread(ctx context.Context, userMessage, threadContext string) (string, error) {
+// ChatWithThread answers using the full Slack thread as context.
+func (a *Client) ChatWithThread(ctx context.Context, userMessage, threadContext string) (string, error) {
 	return a.sendMessage(ctx, a.config.Prompts.Thread, []openai.ChatCompletionMessageParamUnion{
 		openai.UserMessage(threadContext),
 		openai.UserMessage(userMessage),
@@ -69,22 +70,18 @@ func (a *AIClient) ChatWithThread(ctx context.Context, userMessage, threadContex
 }
 
 // ChatWithFiles answers a message that includes file attachments.
-func (a *AIClient) ChatWithFiles(ctx context.Context, userMessage string, files []FileAttachment) (string, error) {
-	parts := []openai.ChatCompletionContentPartUnionParam{
-		openai.TextContentPart(userMessage),
-	}
-	parts = append(parts, filesToContentParts(files)...)
+func (a *Client) ChatWithFiles(ctx context.Context, userMessage string, files []extract.FileAttachment) (string, error) {
+	parts := []openai.ChatCompletionContentPartUnionParam{openai.TextContentPart(userMessage)}
+	parts = append(parts, extract.ToContentParts(files)...)
 	return a.sendMessage(ctx, a.config.Prompts.Chat, []openai.ChatCompletionMessageParamUnion{
 		openai.UserMessage(parts),
 	})
 }
 
 // ChatWithThreadAndFiles answers using thread context and file attachments.
-func (a *AIClient) ChatWithThreadAndFiles(ctx context.Context, userMessage, threadContext string, files []FileAttachment) (string, error) {
-	parts := []openai.ChatCompletionContentPartUnionParam{
-		openai.TextContentPart(userMessage),
-	}
-	parts = append(parts, filesToContentParts(files)...)
+func (a *Client) ChatWithThreadAndFiles(ctx context.Context, userMessage, threadContext string, files []extract.FileAttachment) (string, error) {
+	parts := []openai.ChatCompletionContentPartUnionParam{openai.TextContentPart(userMessage)}
+	parts = append(parts, extract.ToContentParts(files)...)
 	return a.sendMessage(ctx, a.config.Prompts.Thread, []openai.ChatCompletionMessageParamUnion{
 		openai.UserMessage(threadContext),
 		openai.UserMessage(parts),

@@ -1,4 +1,4 @@
-package main
+package config
 
 import (
 	"fmt"
@@ -13,22 +13,21 @@ type BotConfig struct {
 	Model     string  `yaml:"model"`
 	Temp      float32 `yaml:"temperature"`
 	MaxTokens int     `yaml:"max_tokens"`
-	Prompts struct {
+	Prompts   struct {
 		Chat   string `yaml:"chat"`
 		Thread string `yaml:"thread"`
 	} `yaml:"prompts"`
 }
 
-// LoadConfig reads and parses the YAML config file.
-func LoadConfig(path string) (*BotConfig, error) {
+// Load reads and parses the YAML config file.
+func Load(path string) (*BotConfig, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read config %s: %w", path, err)
 	}
 
 	cfg := &BotConfig{
-		// defaults
-		Temp: 0.7,
+		Temp: 0.7, // default
 	}
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parse config %s: %w", path, err)

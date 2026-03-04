@@ -1,4 +1,4 @@
-package main
+package extract
 
 import (
 	"archive/zip"
@@ -8,19 +8,16 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/jonasbg/paibot/internal/logutil"
 )
 
-// isOfficeDocMimeType returns true for Office XML formats we can extract text from.
 func isOfficeDocMimeType(mime string) bool {
-	officeTypes := []string{
-		"application/vnd.openxmlformats-officedocument.presentationml.presentation", // .pptx
-		"application/vnd.openxmlformats-officedocument.wordprocessingml.document",   // .docx
-		"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",         // .xlsx
-	}
-	for _, t := range officeTypes {
-		if mime == t {
-			return true
-		}
+	switch mime {
+	case "application/vnd.openxmlformats-officedocument.presentationml.presentation", // .pptx
+		"application/vnd.openxmlformats-officedocument.wordprocessingml.document",  // .docx
+		"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":        // .xlsx
+		return true
 	}
 	return false
 }
@@ -29,7 +26,6 @@ func isOfficeDocMimeType(mime string) bool {
 var slideNumberRe = regexp.MustCompile(`ppt/slides/slide(\d+)\.xml`)
 
 // extractTextFromOfficeDoc extracts plain text from .pptx, .docx, or .xlsx files.
-// These are ZIP archives containing XML; we parse out the text content.
 func extractTextFromOfficeDoc(data []byte, mime string) (string, error) {
 	r, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
@@ -44,10 +40,7 @@ func extractTextFromOfficeDoc(data []byte, mime string) (string, error) {
 				xmlPaths = append(xmlPaths, f.Name)
 			}
 		}
-		// Sort slides by number
-		sort.Slice(xmlPaths, func(i, j int) bool {
-			return xmlPaths[i] < xmlPaths[j]
-		})
+		sort.Strings(xmlPaths)
 	case strings.Contains(mime, "wordprocessingml"): // .docx
 		xmlPaths = []string{"word/document.xml"}
 	case strings.Contains(mime, "spreadsheetml"): // .xlsx
@@ -58,7 +51,7 @@ func extractTextFromOfficeDoc(data []byte, mime string) (string, error) {
 	for _, path := range xmlPaths {
 		text, err := extractXMLText(r, path)
 		if err != nil {
-			logVerbose("failed to extract text from %s: %v", path, err)
+			logutil.Logf("failed to extract text from %s: %v", path, err)
 			continue
 		}
 		if text != "" {
@@ -66,9 +59,7 @@ func extractTextFromOfficeDoc(data []byte, mime string) (string, error) {
 				sb.WriteString("\n\n---\n\n")
 			}
 			if strings.Contains(mime, "presentationml") {
-				// Label each slide
-				m := slideNumberRe.FindStringSubmatch(path)
-				if len(m) > 1 {
+				if m := slideNumberRe.FindStringSubmatch(path); len(m) > 1 {
 					sb.WriteString(fmt.Sprintf("[Slide %s]\n", m[1]))
 				}
 			}
@@ -83,7 +74,6 @@ func extractTextFromOfficeDoc(data []byte, mime string) (string, error) {
 	return result, nil
 }
 
-// extractXMLText reads a file from a ZIP archive and extracts all text content from the XML.
 func extractXMLText(r *zip.Reader, path string) (string, error) {
 	for _, f := range r.File {
 		if f.Name != path {
