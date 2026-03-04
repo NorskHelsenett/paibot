@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log"
 	"strings"
-	"sync"
 
 	"github.com/slack-go/slack"
 	"github.com/slack-go/slack/slackevents"
@@ -31,46 +30,22 @@ func logVerbose(format string, args ...any) {
 	}
 }
 
-// activeThreads tracks threads the bot is participating in.
-// Key: "channel:threadTS"
-var activeThreads sync.Map
-
-// inflight tracks message timestamps currently being processed to prevent
-// duplicate handling (Slack sends both app_mention and message events for
-// @mentions in threads).
-var inflight sync.Map
-
-// botInThread checks whether the bot has previously posted in or been @mentioned
-// in the given thread.
-func botInThread(client *slack.Client, botUserID, channel, threadTS string) bool {
-	params := &slack.GetConversationRepliesParameters{
-		ChannelID: channel,
-		Timestamp: threadTS,
+// react adds or removes a reaction emoji on a message.
+func react(client *slack.Client, add bool, emoji, channel, ts string) {
+	ref := slack.ItemRef{Channel: channel, Timestamp: ts}
+	if add {
+		_ = client.AddReaction(emoji, ref)
+	} else {
+		_ = client.RemoveReaction(emoji, ref)
 	}
-	msgs, _, _, err := client.GetConversationReplies(params)
-	if err != nil {
-		logVerbose("botInThread: failed to fetch replies for %s:%s: %v", channel, threadTS, err)
-		return false
-	}
-	mention := "<@" + botUserID + ">"
-	for _, m := range msgs {
-		if m.User == botUserID {
-			return true
-		}
-		if strings.Contains(m.Text, mention) {
-			return true
-		}
-	}
-	return false
 }
 
 // fetchThreadContext retrieves all messages in a thread and formats them for AI context.
 func fetchThreadContext(client *slack.Client, channel, threadTS string) (string, error) {
-	params := &slack.GetConversationRepliesParameters{
+	msgs, _, _, err := client.GetConversationReplies(&slack.GetConversationRepliesParameters{
 		ChannelID: channel,
 		Timestamp: threadTS,
-	}
-	msgs, _, _, err := client.GetConversationReplies(params)
+	})
 	if err != nil {
 		return "", fmt.Errorf("conversations.replies: %w", err)
 	}
@@ -89,9 +64,8 @@ func fetchThreadContext(client *slack.Client, channel, threadTS string) (string,
 	return sb.String(), nil
 }
 
-func handleAppMention(client *slack.Client, ai *AIClient, botUserID string, event *slackevents.AppMentionEvent) {
+func handleAppMention(client *slack.Client, ai *AIClient, event *slackevents.AppMentionEvent) {
 	eid := nextEventID()
-	defer inflight.Delete(event.TimeStamp)
 
 	// Strip the bot mention prefix (e.g. "<@U12345> ")
 	text := strings.TrimSpace(event.Text)
@@ -102,7 +76,6 @@ func handleAppMention(client *slack.Client, ai *AIClient, botUserID string, even
 		return
 	}
 
-	// Use thread_ts if in a thread, otherwise the message ts starts a new thread
 	threadTS := event.ThreadTimeStamp
 	if threadTS == "" {
 		threadTS = event.TimeStamp
@@ -111,18 +84,12 @@ func handleAppMention(client *slack.Client, ai *AIClient, botUserID string, even
 	conversationID := event.Channel + ":" + threadTS
 	log.Printf("[%s] mention from user=%s channel=%s — forwarding to AI", eid, event.User, conversationID)
 
-	// Add 🤔 reaction to indicate we're working on it
-	if err := client.AddReaction("thinking_face", slack.ItemRef{
-		Channel:   event.Channel,
-		Timestamp: event.TimeStamp,
-	}); err != nil {
-		logVerbose("[%s] failed to add thinking reaction: %v", eid, err)
-	}
+	react(client, true, "thinking_face", event.Channel, event.TimeStamp)
 
-	var reply string
-	var err error
-
-	// If mentioned inside an existing thread, fetch thread context so the bot can participate
+	var (
+		reply string
+		err   error
+	)
 	if event.ThreadTimeStamp != "" {
 		threadContext, fetchErr := fetchThreadContext(client, event.Channel, threadTS)
 		if fetchErr != nil {
@@ -138,104 +105,16 @@ func handleAppMention(client *slack.Client, ai *AIClient, botUserID string, even
 		reply = "Sorry, I encountered an error. Please try again."
 	}
 
-	_, _, postErr := client.PostMessage(
+	if _, _, postErr := client.PostMessage(
 		event.Channel,
 		slack.MsgOptionText(reply, false),
 		slack.MsgOptionTS(threadTS),
-	)
-	if postErr != nil {
+	); postErr != nil {
 		log.Printf("[%s] failed to post reply: %v", eid, postErr)
 	}
 
-	// Remove 🤔 and add ✅ to indicate we're done
-	_ = client.RemoveReaction("thinking_face", slack.ItemRef{
-		Channel:   event.Channel,
-		Timestamp: event.TimeStamp,
-	})
-	_ = client.AddReaction("white_check_mark", slack.ItemRef{
-		Channel:   event.Channel,
-		Timestamp: event.TimeStamp,
-	})
-
-	// Mark this thread as active so we respond to follow-up messages
-	activeThreads.Store(event.Channel+":"+threadTS, true)
-
-	log.Printf("[%s] answered", eid)
-}
-
-// handleThreadMessage handles messages in threads the bot is already participating in.
-func handleThreadMessage(client *slack.Client, ai *AIClient, botUserID string, event *slackevents.MessageEvent) {
-	eid := nextEventID()
-	defer inflight.Delete(event.TimeStamp)
-
-	// Ignore bot's own messages, edited messages, and empty text
-	if event.User == botUserID || event.BotID != "" || event.SubType != "" {
-		logVerbose("[%s] thread message ignored (own/bot/subtype)", eid)
-		return
-	}
-
-	text := strings.TrimSpace(event.Text)
-	if text == "" {
-		return
-	}
-
-	threadTS := event.ThreadTimeStamp
-	if threadTS == "" {
-		return
-	}
-
-	threadKey := event.Channel + ":" + threadTS
-	if _, active := activeThreads.Load(threadKey); !active {
-		logVerbose("[%s] thread %s not cached, checking API", eid, threadKey)
-		if !botInThread(client, botUserID, event.Channel, threadTS) {
-			logVerbose("[%s] bot not in thread %s, ignoring", eid, threadKey)
-			return
-		}
-		activeThreads.Store(threadKey, true)
-	}
-
-	log.Printf("[%s] thread reply from user=%s in %s — forwarding to AI", eid, event.User, threadKey)
-
-	// Add 🤔 reaction while processing
-	if err := client.AddReaction("thinking_face", slack.ItemRef{
-		Channel:   event.Channel,
-		Timestamp: event.TimeStamp,
-	}); err != nil {
-		logVerbose("[%s] failed to add thinking reaction: %v", eid, err)
-	}
-
-	conversationID := threadKey
-
-	// Fetch thread context for the AI
-	threadContext, fetchErr := fetchThreadContext(client, event.Channel, threadTS)
-	if fetchErr != nil {
-		logVerbose("[%s] failed to fetch thread context: %v", eid, fetchErr)
-	}
-
-	reply, err := ai.ChatWithThread(context.Background(), conversationID, text, threadContext)
-	if err != nil {
-		log.Printf("[%s] error from AI: %v", eid, err)
-		reply = "Sorry, I encountered an error. Please try again."
-	}
-
-	_, _, postErr := client.PostMessage(
-		event.Channel,
-		slack.MsgOptionText(reply, false),
-		slack.MsgOptionTS(threadTS),
-	)
-	if postErr != nil {
-		log.Printf("[%s] failed to post reply: %v", eid, postErr)
-	}
-
-	// Remove 🤔 and add ✅
-	_ = client.RemoveReaction("thinking_face", slack.ItemRef{
-		Channel:   event.Channel,
-		Timestamp: event.TimeStamp,
-	})
-	_ = client.AddReaction("white_check_mark", slack.ItemRef{
-		Channel:   event.Channel,
-		Timestamp: event.TimeStamp,
-	})
+	react(client, false, "thinking_face", event.Channel, event.TimeStamp)
+	react(client, true, "white_check_mark", event.Channel, event.TimeStamp)
 
 	log.Printf("[%s] answered", eid)
 }
@@ -243,7 +122,6 @@ func handleThreadMessage(client *slack.Client, ai *AIClient, botUserID string, e
 func handleDM(client *slack.Client, ai *AIClient, event *slackevents.MessageEvent) {
 	eid := nextEventID()
 
-	// Ignore bot messages and edited messages
 	if event.BotID != "" || event.SubType != "" {
 		return
 	}
@@ -253,15 +131,12 @@ func handleDM(client *slack.Client, ai *AIClient, event *slackevents.MessageEven
 		return
 	}
 
-	// Use existing thread or start a new one from the message timestamp
 	threadTS := event.ThreadTimeStamp
 	if threadTS == "" {
 		threadTS = event.TimeStamp
 	}
 
-	// Use channel + thread as the conversation key
 	conversationID := event.Channel + ":" + threadTS
-
 	log.Printf("[%s] DM from user=%s — forwarding to AI", eid, event.User)
 
 	reply, err := ai.Chat(context.Background(), conversationID, text)
@@ -270,33 +145,28 @@ func handleDM(client *slack.Client, ai *AIClient, event *slackevents.MessageEven
 		reply = "Sorry, I encountered an error. Please try again."
 	}
 
-	_, _, err = client.PostMessage(
+	if _, _, err = client.PostMessage(
 		event.Channel,
 		slack.MsgOptionText(reply, false),
 		slack.MsgOptionTS(threadTS),
-	)
-	if err != nil {
+	); err != nil {
 		log.Printf("[%s] failed to post reply: %v", eid, err)
 	}
 
 	log.Printf("[%s] answered", eid)
 }
 
-func handleEvents(client *slack.Client, ai *AIClient, botUserID string, socketClient *socketmode.Client) {
+func handleEvents(client *slack.Client, ai *AIClient, socketClient *socketmode.Client) {
 	for evt := range socketClient.Events {
 		switch evt.Type {
 		case socketmode.EventTypeConnecting:
 			log.Println("Connecting to Slack...")
-
 		case socketmode.EventTypeConnectionError:
 			log.Printf("Connection error: %v", evt.Data)
-
 		case socketmode.EventTypeConnected:
 			log.Println("Connected to Slack with Socket Mode")
-
 		case socketmode.EventTypeDisconnect:
 			log.Printf("Disconnected from Slack: %v", evt.Data)
-
 		case socketmode.EventTypeHello:
 			log.Println("Received hello from Slack")
 
@@ -308,36 +178,24 @@ func handleEvents(client *slack.Client, ai *AIClient, botUserID string, socketCl
 			socketClient.Ack(*evt.Request)
 			logVerbose("Event received: type=%s inner=%s", eventsAPIEvent.Type, eventsAPIEvent.InnerEvent.Type)
 
-			switch eventsAPIEvent.Type {
-			case slackevents.CallbackEvent:
-				switch ev := eventsAPIEvent.InnerEvent.Data.(type) {
-				case *slackevents.AppMentionEvent:
-					// Claim this message timestamp; if already claimed by a message event, skip.
-					if _, dup := inflight.LoadOrStore(ev.TimeStamp, true); dup {
-						logVerbose("dedup: app_mention ts=%s already in-flight, skipping", ev.TimeStamp)
-					} else {
-						go handleAppMention(client, ai, botUserID, ev)
-					}
-				case *slackevents.MessageEvent:
-					logVerbose("message event: channel=%s subtype=%q user=%q threadTS=%q",
-						ev.Channel, ev.SubType, ev.User, ev.ThreadTimeStamp)
-					if strings.HasPrefix(ev.Channel, "D") {
-						go handleDM(client, ai, ev)
-					} else if ev.ThreadTimeStamp != "" {
-						// Claim this message; skip if already handled by app_mention.
-						if _, dup := inflight.LoadOrStore(ev.TimeStamp, true); dup {
-							logVerbose("dedup: message ts=%s already in-flight, skipping", ev.TimeStamp)
-						} else {
-							go handleThreadMessage(client, ai, botUserID, ev)
-						}
-					}
-				case *slackevents.ReactionAddedEvent:
-					// Ignore reaction events (often triggered by our own reactions)
-				case *slackevents.ReactionRemovedEvent:
-					// Ignore reaction removal events
-				default:
-					logVerbose("unhandled inner event type: %T", eventsAPIEvent.InnerEvent.Data)
+			if eventsAPIEvent.Type != slackevents.CallbackEvent {
+				continue
+			}
+
+			switch ev := eventsAPIEvent.InnerEvent.Data.(type) {
+			case *slackevents.AppMentionEvent:
+				// All @mentions (channel or thread) are handled here.
+				// This ensures the bot only responds in threads when explicitly mentioned.
+				go handleAppMention(client, ai, ev)
+			case *slackevents.MessageEvent:
+				logVerbose("message event: channel=%s subtype=%q user=%q threadTS=%q",
+					ev.Channel, ev.SubType, ev.User, ev.ThreadTimeStamp)
+				if strings.HasPrefix(ev.Channel, "D") {
+					go handleDM(client, ai, ev)
 				}
+				// Thread messages are intentionally ignored here; app_mention handles @mentions.
+			default:
+				logVerbose("unhandled inner event type: %T", eventsAPIEvent.InnerEvent.Data)
 			}
 
 		case socketmode.EventTypeSlashCommand:
