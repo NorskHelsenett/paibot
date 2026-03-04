@@ -4,6 +4,7 @@ go 1.25
 
 require (
 	github.com/joho/godotenv v1.5.1
+	github.com/ledongthuc/pdf v0.0.0-20250511090121-5959a4027728
 	github.com/openai/openai-go v1.12.0
 	github.com/slack-go/slack v0.18.0
 	gopkg.in/yaml.v3 v3.0.1

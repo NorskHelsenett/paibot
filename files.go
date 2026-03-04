@@ -128,10 +128,37 @@ func isTextLikeMimeType(mime string) bool {
 	return false
 }
 
+// fileToInlineText converts a FileAttachment to a plain-text string for embedding in
+// thread context. Images are noted by name only (no base64). Extractable documents
+// have their text inlined. Unsupported binaries get a size note.
+func fileToInlineText(f FileAttachment) string {
+	switch {
+	case isImageMimeType(f.MimeType):
+		return fmt.Sprintf("[Attached image: %s]\n", f.Name)
+	case isTextLikeMimeType(f.MimeType):
+		return fmt.Sprintf("[File: %s]\n%s\n", f.Name, string(f.Data))
+	case isOfficeDocMimeType(f.MimeType):
+		text, err := extractTextFromOfficeDoc(f.Data, f.MimeType)
+		if err != nil {
+			return fmt.Sprintf("[Attached file: %s — could not extract text]\n", f.Name)
+		}
+		logVerbose("extracted %d chars of text from %s", len(text), f.Name)
+		return fmt.Sprintf("[File: %s]\n%s\n", f.Name, text)
+	case isPDFMimeType(f.MimeType):
+		text, err := extractTextFromPDF(f.Data)
+		if err != nil {
+			return fmt.Sprintf("[Attached file: %s — could not extract text]\n", f.Name)
+		}
+		logVerbose("extracted %d chars of text from %s", len(text), f.Name)
+		return fmt.Sprintf("[File: %s]\n%s\n", f.Name, text)
+	default:
+		return fmt.Sprintf("[Attached file: %s (type: %s, %d bytes)]\n", f.Name, f.MimeType, len(f.Data))
+	}
+}
+
 // filesToContentParts converts FileAttachments to openai content parts.
 // Images become ImageContentPart with base64 data URLs.
-// Text-like files become TextContentPart with inline content.
-// Office documents (.pptx, .docx, .xlsx) have text extracted and sent inline.
+// Text-like files, Office documents, and PDFs have text extracted and sent inline.
 // Other binary files are noted as text so the AI knows they were attached.
 func filesToContentParts(files []FileAttachment) []openai.ChatCompletionContentPartUnionParam {
 	var parts []openai.ChatCompletionContentPartUnionParam
@@ -142,27 +169,12 @@ func filesToContentParts(files []FileAttachment) []openai.ChatCompletionContentP
 			parts = append(parts, openai.ImageContentPart(openai.ChatCompletionContentPartImageImageURLParam{
 				URL: dataURL,
 			}))
-		} else if isTextLikeMimeType(f.MimeType) {
-			content := fmt.Sprintf("[File: %s]\n%s", f.Name, string(f.Data))
-			parts = append(parts, openai.TextContentPart(content))
-		} else if isOfficeDocMimeType(f.MimeType) {
-			text, err := extractTextFromOfficeDoc(f.Data, f.MimeType)
-			if err != nil {
-				log.Printf("failed to extract text from %s: %v", f.Name, err)
-				note := fmt.Sprintf("[Attached file: %s (type: %s, %d bytes) — could not extract text]",
-					f.Name, f.MimeType, len(f.Data))
-				parts = append(parts, openai.TextContentPart(note))
-			} else {
-				content := fmt.Sprintf("[File: %s]\n%s", f.Name, text)
-				parts = append(parts, openai.TextContentPart(content))
-				logVerbose("extracted %d chars of text from %s", len(text), f.Name)
-			}
 		} else {
-			// Truly unsupported binary files.
-			note := fmt.Sprintf("[Attached file: %s (type: %s, %d bytes) — binary file contents cannot be processed directly]",
-				f.Name, f.MimeType, len(f.Data))
-			parts = append(parts, openai.TextContentPart(note))
-			log.Printf("unsupported file type for AI: %s (%s)", f.Name, f.MimeType)
+			text := fileToInlineText(f)
+			if !isTextLikeMimeType(f.MimeType) && !isOfficeDocMimeType(f.MimeType) && !isPDFMimeType(f.MimeType) {
+				log.Printf("unsupported file type for AI: %s (%s)", f.Name, f.MimeType)
+			}
+			parts = append(parts, openai.TextContentPart(text))
 		}
 	}
 	return parts

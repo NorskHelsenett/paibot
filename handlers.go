@@ -49,13 +49,26 @@ func reactError(client *slack.Client, eid, msg, channel, ts string, err error) {
 }
 
 // fetchThreadContext retrieves all messages in a thread and formats them for AI context.
-func fetchThreadContext(client *slack.Client, channel, threadTS string) (string, error) {
+// Files from earlier messages are downloaded and their text content is included inline,
+// so the AI has access to previously shared documents without reprocessing them separately.
+// Files from currentTS are skipped since they are handled separately by the caller.
+func fetchThreadContext(client *slack.Client, botToken, channel, threadTS, currentTS string) (string, error) {
 	msgs, _, _, err := client.GetConversationReplies(&slack.GetConversationRepliesParameters{
 		ChannelID: channel,
 		Timestamp: threadTS,
 	})
 	if err != nil {
 		return "", fmt.Errorf("conversations.replies: %w", err)
+	}
+
+	// Find the most recent prior message that has files — only that one is downloaded.
+	// Earlier file messages are noted by name only to keep context concise.
+	latestFileTS := ""
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Timestamp != currentTS && len(msgs[i].Files) > 0 {
+			latestFileTS = msgs[i].Timestamp
+			break
+		}
 	}
 
 	var sb strings.Builder
@@ -68,6 +81,24 @@ func fetchThreadContext(client *slack.Client, channel, threadTS string) (string,
 			user = "unknown"
 		}
 		sb.WriteString(fmt.Sprintf("<@%s>: %s\n", user, m.Text))
+
+		if m.Timestamp == currentTS || len(m.Files) == 0 {
+			continue
+		}
+
+		if m.Timestamp != latestFileTS {
+			// Older file messages: just note their names, don't download.
+			for _, f := range m.Files {
+				sb.WriteString(fmt.Sprintf("[Earlier attached file: %s]\n", f.Name))
+			}
+			continue
+		}
+
+		// Latest file message: download and inline content.
+		attachments := extractFiles(botToken, m.Files)
+		for _, f := range attachments {
+			sb.WriteString(fileToInlineText(f))
+		}
 	}
 	return sb.String(), nil
 }
@@ -108,7 +139,7 @@ func handleAppMention(client *slack.Client, ai *AIClient, botToken string, event
 		err   error
 	)
 	if event.ThreadTimeStamp != "" {
-		threadContext, fetchErr := fetchThreadContext(client, event.Channel, threadTS)
+		threadContext, fetchErr := fetchThreadContext(client, botToken, event.Channel, threadTS, event.TimeStamp)
 		if fetchErr != nil {
 			logVerbose("[%s] failed to fetch thread context: %v", eid, fetchErr)
 			if len(files) > 0 {
@@ -192,7 +223,7 @@ func handleDM(client *slack.Client, ai *AIClient, botToken string, event *slacke
 	var reply string
 	var err error
 	if event.ThreadTimeStamp != "" {
-		threadContext, fetchErr := fetchThreadContext(client, event.Channel, threadTS)
+		threadContext, fetchErr := fetchThreadContext(client, botToken, event.Channel, threadTS, event.TimeStamp)
 		if fetchErr != nil {
 			logVerbose("[%s] failed to fetch DM thread context: %v", eid, fetchErr)
 			if len(files) > 0 {
