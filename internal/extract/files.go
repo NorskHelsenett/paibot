@@ -154,8 +154,21 @@ func ToContentParts(files []FileAttachment) []openai.ChatCompletionContentPartUn
 	var parts []openai.ChatCompletionContentPartUnionParam
 	for _, f := range files {
 		if isImageMimeType(f.MimeType) {
-			b64 := base64.StdEncoding.EncodeToString(f.Data)
-			dataURL := fmt.Sprintf("data:%s;base64,%s", f.MimeType, b64)
+			imgData := f.Data
+			mime := f.MimeType
+			if isHEICMimeType(mime) {
+				converted, err := convertHEICToJPEG(imgData)
+				if err != nil {
+					log.Printf("failed to convert HEIC %s to JPEG: %v", f.Name, err)
+					parts = append(parts, openai.TextContentPart(fmt.Sprintf("[Attached image: %s — could not convert HEIC]\n", f.Name)))
+					continue
+				}
+				logutil.Logf("converted HEIC %s to JPEG (%d bytes)", f.Name, len(converted))
+				imgData = converted
+				mime = "image/jpeg"
+			}
+			b64 := base64.StdEncoding.EncodeToString(imgData)
+			dataURL := fmt.Sprintf("data:%s;base64,%s", mime, b64)
 			parts = append(parts, openai.ImageContentPart(openai.ChatCompletionContentPartImageImageURLParam{
 				URL: dataURL,
 			}))

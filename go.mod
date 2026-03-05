@@ -11,6 +11,7 @@ require (
 )
 
 require (
+	github.com/adrium/goheif v0.0.0-20230113233934-ca402e77a786 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/tidwall/gjson v1.14.4 // indirect
 	github.com/tidwall/match v1.1.1 // indirect
