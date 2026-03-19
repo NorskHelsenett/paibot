@@ -10,5 +10,8 @@ FROM scratch
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 COPY --from=build /app /app
 COPY --from=build /src/config.yaml /etc/paibot/config.yaml
+
+ENV TZ=Europe/Oslo
+
 ENTRYPOINT ["/app"]
 CMD ["--config", "/etc/paibot/config.yaml"]
