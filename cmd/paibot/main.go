@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"log"
 	"os"
@@ -84,20 +85,23 @@ func main() {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGTERM, syscall.SIGINT)
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	var wg sync.WaitGroup
 
 	// Start event handler in a goroutine
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		bot.HandleEvents(client, aiClient, botToken, socketClient)
+		bot.HandleEvents(client, aiClient, botToken, authResp.UserID, socketClient)
 	}()
 
 	// Start socket client in a goroutine
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if err := socketClient.Run(); err != nil {
+		if err := socketClient.RunContext(ctx); err != nil && ctx.Err() == nil {
 			log.Fatalf("Socket mode error: %v", err)
 		}
 	}()
@@ -107,8 +111,8 @@ func main() {
 	log.Println("Shutdown signal received, marking in-flight messages as error...")
 	bot.MarkInFlightAsError(client)
 
-	// Close socket client
-	socketClient.Close()
+	// Cancel context to stop socket client
+	cancel()
 
 	// Wait for all goroutines to complete
 	wg.Wait()

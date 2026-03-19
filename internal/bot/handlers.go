@@ -81,7 +81,7 @@ func reactError(client *slack.Client, eid, msg, channel, ts string, err error) {
 // Files from the most recent prior message that has files are returned as FileAttachments
 // so they can be forwarded to the AI as proper content parts (including images).
 // Older file messages are noted by name only. Files from currentTS are skipped (handled by caller).
-func fetchThreadContext(client *slack.Client, botToken, channel, threadTS, currentTS string) (string, []extract.FileAttachment, error) {
+func fetchThreadContext(client *slack.Client, botToken, botUserID, channel, threadTS, currentTS string) (string, []extract.FileAttachment, error) {
 	msgs, _, _, err := client.GetConversationReplies(&slack.GetConversationRepliesParameters{
 		ChannelID: channel,
 		Timestamp: threadTS,
@@ -99,6 +99,26 @@ func fetchThreadContext(client *slack.Client, botToken, channel, threadTS, curre
 		}
 	}
 
+	// Build a cache of user ID → display name to avoid repeated API calls.
+	nameCache := map[string]string{
+		botUserID: "PAI (you)",
+	}
+	resolveUser := func(userID string) string {
+		if userID == "" {
+			return "unknown"
+		}
+		if name, ok := nameCache[userID]; ok {
+			return name
+		}
+		if info, err := client.GetUserInfo(userID); err == nil && info.RealName != "" {
+			nameCache[userID] = info.RealName
+			return info.RealName
+		}
+		// Fallback: keep the raw Slack mention so the AI still sees something.
+		nameCache[userID] = fmt.Sprintf("<@%s>", userID)
+		return nameCache[userID]
+	}
+
 	var sb strings.Builder
 	var threadFiles []extract.FileAttachment
 	for _, m := range msgs {
@@ -106,10 +126,8 @@ func fetchThreadContext(client *slack.Client, botToken, channel, threadTS, curre
 		if user == "" {
 			user = m.BotID
 		}
-		if user == "" {
-			user = "unknown"
-		}
-		sb.WriteString(fmt.Sprintf("<@%s>: %s\n", user, m.Text))
+		label := resolveUser(user)
+		sb.WriteString(fmt.Sprintf("%s: %s\n", label, m.Text))
 
 		if m.Timestamp == currentTS || len(m.Files) == 0 {
 			continue
@@ -132,7 +150,7 @@ func fetchThreadContext(client *slack.Client, botToken, channel, threadTS, curre
 	return sb.String(), threadFiles, nil
 }
 
-func handleAppMention(client *slack.Client, aiClient *ai.Client, botToken string, event *slackevents.AppMentionEvent) {
+func handleAppMention(client *slack.Client, aiClient *ai.Client, botToken, botUserID string, event *slackevents.AppMentionEvent) {
 	eid := nextEventID()
 
 	text := strings.TrimSpace(event.Text)
@@ -162,7 +180,7 @@ func handleAppMention(client *slack.Client, aiClient *ai.Client, botToken string
 		log.Printf("[%s] extracted %d file(s) from mention", eid, len(files))
 	}
 
-	reply, err := callAI(aiClient, client, botToken, eid, event.Channel, threadTS, event.TimeStamp, event.ThreadTimeStamp != "", text, files)
+	reply, err := callAI(aiClient, client, botToken, botUserID, eid, event.Channel, threadTS, event.TimeStamp, event.ThreadTimeStamp != "", text, files)
 	if err != nil {
 		reactError(client, eid, "error from AI", event.Channel, event.TimeStamp, err)
 		return
@@ -182,7 +200,7 @@ func handleAppMention(client *slack.Client, aiClient *ai.Client, botToken string
 	log.Printf("[%s] answered", eid)
 }
 
-func handleDM(client *slack.Client, aiClient *ai.Client, botToken string, event *slackevents.MessageEvent) {
+func handleDM(client *slack.Client, aiClient *ai.Client, botToken, botUserID string, event *slackevents.MessageEvent) {
 	eid := nextEventID()
 
 	if event.BotID != "" {
@@ -217,7 +235,7 @@ func handleDM(client *slack.Client, aiClient *ai.Client, botToken string, event 
 	AddInFlightMessage(event.Channel, event.TimeStamp)
 	defer RemoveInFlightMessage(event.Channel, event.TimeStamp)
 
-	reply, err := callAI(aiClient, client, botToken, eid, event.Channel, threadTS, event.TimeStamp, event.ThreadTimeStamp != "", text, files)
+	reply, err := callAI(aiClient, client, botToken, botUserID, eid, event.Channel, threadTS, event.TimeStamp, event.ThreadTimeStamp != "", text, files)
 	if err != nil {
 		reactError(client, eid, "error from AI", event.Channel, event.TimeStamp, err)
 		return
@@ -239,7 +257,7 @@ func handleDM(client *slack.Client, aiClient *ai.Client, botToken string, event 
 
 // callAI dispatches to the right AI method based on whether we have a thread and/or files.
 // It also handles the fallback if fetching thread context fails.
-func callAI(aiClient *ai.Client, slackClient *slack.Client, botToken, eid, channel, threadTS, currentTS string, inThread bool, text string, files []extract.FileAttachment) (string, error) {
+func callAI(aiClient *ai.Client, slackClient *slack.Client, botToken, botUserID, eid, channel, threadTS, currentTS string, inThread bool, text string, files []extract.FileAttachment) (string, error) {
 	ctx := context.Background()
 
 	if !inThread {
@@ -249,7 +267,7 @@ func callAI(aiClient *ai.Client, slackClient *slack.Client, botToken, eid, chann
 		return aiClient.Chat(ctx, text)
 	}
 
-	threadContext, threadFiles, err := fetchThreadContext(slackClient, botToken, channel, threadTS, currentTS)
+	threadContext, threadFiles, err := fetchThreadContext(slackClient, botToken, botUserID, channel, threadTS, currentTS)
 	if err != nil {
 		logutil.Logf("[%s] failed to fetch thread context: %v", eid, err)
 		if len(files) > 0 {
@@ -288,7 +306,7 @@ func MarkInFlightAsError(client *slack.Client) {
 }
 
 // HandleEvents is the main event loop consuming socket mode events.
-func HandleEvents(client *slack.Client, aiClient *ai.Client, botToken string, socketClient *socketmode.Client) {
+func HandleEvents(client *slack.Client, aiClient *ai.Client, botToken, botUserID string, socketClient *socketmode.Client) {
 	for evt := range socketClient.Events {
 		switch evt.Type {
 		case socketmode.EventTypeConnecting:
@@ -316,12 +334,12 @@ func HandleEvents(client *slack.Client, aiClient *ai.Client, botToken string, so
 
 			switch ev := eventsAPIEvent.InnerEvent.Data.(type) {
 			case *slackevents.AppMentionEvent:
-				go handleAppMention(client, aiClient, botToken, ev)
+				go handleAppMention(client, aiClient, botToken, botUserID, ev)
 			case *slackevents.MessageEvent:
 				logutil.Logf("message event: channel=%s subtype=%q user=%q threadTS=%q",
 					ev.Channel, ev.SubType, ev.User, ev.ThreadTimeStamp)
 				if strings.HasPrefix(ev.Channel, "D") {
-					go handleDM(client, aiClient, botToken, ev)
+					go handleDM(client, aiClient, botToken, botUserID, ev)
 				}
 			default:
 				logutil.Logf("unhandled inner event type: %T", eventsAPIEvent.InnerEvent.Data)
