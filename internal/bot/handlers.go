@@ -27,6 +27,7 @@ type Message struct {
 var (
 	inFlightMessages = make(map[string]Message)
 	inFlightMutex    sync.Mutex
+	handlerWg        sync.WaitGroup
 )
 
 // AddInFlightMessage adds a message to the in-flight tracking
@@ -288,6 +289,11 @@ func callAI(aiClient *ai.Client, slackClient *slack.Client, botToken, botUserID,
 	return aiClient.ChatWithThread(ctx, text, threadContext)
 }
 
+// WaitForHandlers blocks until all in-progress handler goroutines have finished.
+func WaitForHandlers() {
+	handlerWg.Wait()
+}
+
 // MarkInFlightAsError marks all in-flight messages with a skull emoji
 // This is called when the bot is shutting down gracefully
 func MarkInFlightAsError(client *slack.Client) {
@@ -334,12 +340,20 @@ func HandleEvents(client *slack.Client, aiClient *ai.Client, botToken, botUserID
 
 			switch ev := eventsAPIEvent.InnerEvent.Data.(type) {
 			case *slackevents.AppMentionEvent:
-				go handleAppMention(client, aiClient, botToken, botUserID, ev)
+				handlerWg.Add(1)
+				go func() {
+					defer handlerWg.Done()
+					handleAppMention(client, aiClient, botToken, botUserID, ev)
+				}()
 			case *slackevents.MessageEvent:
 				logutil.Logf("message event: channel=%s subtype=%q user=%q threadTS=%q",
 					ev.Channel, ev.SubType, ev.User, ev.ThreadTimeStamp)
 				if strings.HasPrefix(ev.Channel, "D") {
-					go handleDM(client, aiClient, botToken, botUserID, ev)
+					handlerWg.Add(1)
+					go func() {
+						defer handlerWg.Done()
+						handleDM(client, aiClient, botToken, botUserID, ev)
+					}()
 				}
 			default:
 				logutil.Logf("unhandled inner event type: %T", eventsAPIEvent.InnerEvent.Data)

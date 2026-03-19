@@ -108,13 +108,19 @@ func main() {
 
 	// Wait for shutdown signal
 	<-sigChan
-	log.Println("Shutdown signal received, marking in-flight messages as error...")
-	bot.MarkInFlightAsError(client)
+	log.Println("Shutdown signal received, waiting for in-flight AI responses to finish...")
 
-	// Cancel context to stop socket client
+	// Cancel context to stop accepting new events
 	cancel()
 
-	// Wait for all goroutines to complete
+	// Wait for all handler goroutines (AI responses) to complete
+	bot.WaitForHandlers()
+	log.Println("All AI responses finished")
+
+	// Mark any still-tracked messages as error (shouldn't be any at this point)
+	bot.MarkInFlightAsError(client)
+
+	// Wait for main goroutines to complete
 	wg.Wait()
 	log.Println("Graceful shutdown completed")
 }
