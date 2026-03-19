@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 
 	"github.com/jonasbg/paibot/internal/ai"
 	"github.com/jonasbg/paibot/internal/extract"
@@ -15,6 +16,45 @@ import (
 	"github.com/slack-go/slack/slackevents"
 	"github.com/slack-go/slack/socketmode"
 )
+
+// Message represents an in-flight message being processed
+type Message struct {
+	Channel   string
+	Timestamp string
+}
+
+// MessageTracker tracks messages currently being processed
+var (
+	inFlightMessages = make(map[string]Message)
+	inFlightMutex    sync.Mutex
+)
+
+// AddInFlightMessage adds a message to the in-flight tracking
+func AddInFlightMessage(channel, ts string) {
+	inFlightMutex.Lock()
+	defer inFlightMutex.Unlock()
+	key := channel + ":" + ts
+	inFlightMessages[key] = Message{Channel: channel, Timestamp: ts}
+}
+
+// RemoveInFlightMessage removes a message from in-flight tracking
+func RemoveInFlightMessage(channel, ts string) {
+	inFlightMutex.Lock()
+	defer inFlightMutex.Unlock()
+	key := channel + ":" + ts
+	delete(inFlightMessages, key)
+}
+
+// GetInFlightMessages returns a copy of all in-flight messages
+func GetInFlightMessages() []Message {
+	inFlightMutex.Lock()
+	defer inFlightMutex.Unlock()
+	messages := make([]Message, 0, len(inFlightMessages))
+	for _, msg := range inFlightMessages {
+		messages = append(messages, msg)
+	}
+	return messages
+}
 
 func nextEventID() string {
 	b := make([]byte, 3)
@@ -110,6 +150,8 @@ func handleAppMention(client *slack.Client, aiClient *ai.Client, botToken string
 
 	log.Printf("[%s] mention from user=%s channel=%s:%s — forwarding to AI", eid, event.User, event.Channel, threadTS)
 	react(client, true, "thinking_face", event.Channel, event.TimeStamp)
+	AddInFlightMessage(event.Channel, event.TimeStamp)
+	defer RemoveInFlightMessage(event.Channel, event.TimeStamp)
 
 	var files []extract.FileAttachment
 	slackFiles, fetchErr := extract.FetchMessageFiles(client, event.Channel, event.TimeStamp, event.ThreadTimeStamp)
@@ -172,6 +214,8 @@ func handleDM(client *slack.Client, aiClient *ai.Client, botToken string, event 
 
 	log.Printf("[%s] DM from user=%s — forwarding to AI", eid, event.User)
 	react(client, true, "thinking_face", event.Channel, event.TimeStamp)
+	AddInFlightMessage(event.Channel, event.TimeStamp)
+	defer RemoveInFlightMessage(event.Channel, event.TimeStamp)
 
 	reply, err := callAI(aiClient, client, botToken, eid, event.Channel, threadTS, event.TimeStamp, event.ThreadTimeStamp != "", text, files)
 	if err != nil {
@@ -224,6 +268,23 @@ func callAI(aiClient *ai.Client, slackClient *slack.Client, botToken, eid, chann
 		return aiClient.ChatWithThreadAndFiles(ctx, text, threadContext, allFiles)
 	}
 	return aiClient.ChatWithThread(ctx, text, threadContext)
+}
+
+// MarkInFlightAsError marks all in-flight messages with a skull emoji
+// This is called when the bot is shutting down gracefully
+func MarkInFlightAsError(client *slack.Client) {
+	messages := GetInFlightMessages()
+	if len(messages) == 0 {
+		log.Println("No in-flight messages to mark as error")
+		return
+	}
+
+	log.Printf("Marking %d in-flight message(s) as error", len(messages))
+	for _, msg := range messages {
+		react(client, false, "thinking_face", msg.Channel, msg.Timestamp)
+		react(client, true, "skull", msg.Channel, msg.Timestamp)
+		log.Printf("Marked message %s:%s as error", msg.Channel, msg.Timestamp)
+	}
 }
 
 // HandleEvents is the main event loop consuming socket mode events.

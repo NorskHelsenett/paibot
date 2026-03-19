@@ -4,7 +4,10 @@ import (
 	"flag"
 	"log"
 	"os"
+	"os/signal"
 	"strings"
+	"sync"
+	"syscall"
 
 	"github.com/joho/godotenv"
 	"github.com/jonasbg/paibot/internal/ai"
@@ -77,9 +80,37 @@ func main() {
 	}
 	socketClient := socketmode.New(client, socketOpts...)
 
-	go bot.HandleEvents(client, aiClient, botToken, socketClient)
+	// Set up signal handling for graceful shutdown
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGTERM, syscall.SIGINT)
 
-	if err := socketClient.Run(); err != nil {
-		log.Fatalf("Socket mode error: %v", err)
-	}
+	var wg sync.WaitGroup
+
+	// Start event handler in a goroutine
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		bot.HandleEvents(client, aiClient, botToken, socketClient)
+	}()
+
+	// Start socket client in a goroutine
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := socketClient.Run(); err != nil {
+			log.Fatalf("Socket mode error: %v", err)
+		}
+	}()
+
+	// Wait for shutdown signal
+	<-sigChan
+	log.Println("Shutdown signal received, marking in-flight messages as error...")
+	bot.MarkInFlightAsError(client)
+
+	// Close socket client
+	socketClient.Close()
+
+	// Wait for all goroutines to complete
+	wg.Wait()
+	log.Println("Graceful shutdown completed")
 }
