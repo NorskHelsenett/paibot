@@ -78,6 +78,39 @@ func reactError(client *slack.Client, eid, msg, channel, ts string, err error) {
 	react(client, true, "usererror", channel, ts)
 }
 
+// resolveUser looks up a Slack user by ID and returns "DisplayName (<@ID>)".
+// Results are cached in nameCache. The botUserID is mapped to "PAI (you)".
+func resolveUser(client *slack.Client, nameCache map[string]string, userID string) string {
+	if userID == "" {
+		return "unknown"
+	}
+	if label, ok := nameCache[userID]; ok {
+		return label
+	}
+	info, err := client.GetUserInfo(userID)
+	if err != nil {
+		logutil.Logf("GetUserInfo(%s) failed: %v", userID, err)
+		nameCache[userID] = fmt.Sprintf("<@%s>", userID)
+		return nameCache[userID]
+	}
+	name := info.Profile.DisplayName
+	if name == "" {
+		name = info.RealName
+	}
+	if name == "" {
+		name = info.Profile.RealNameNormalized
+	}
+	if name == "" {
+		name = info.Name
+	}
+	if name == "" {
+		nameCache[userID] = fmt.Sprintf("<@%s>", userID)
+		return nameCache[userID]
+	}
+	nameCache[userID] = fmt.Sprintf("%s (<@%s>)", name, userID)
+	return nameCache[userID]
+}
+
 // fetchThreadContext retrieves all messages in a thread and formats them for AI context.
 // Files from the most recent prior message that has files are returned as FileAttachments
 // so they can be forwarded to the AI as proper content parts (including images).
@@ -100,34 +133,38 @@ func fetchThreadContext(client *slack.Client, botToken, botUserID, channel, thre
 		}
 	}
 
-	// Build a cache of user ID → display name to avoid repeated API calls.
 	nameCache := map[string]string{
 		botUserID: "PAI (you)",
 	}
-	resolveUser := func(userID string) string {
-		if userID == "" {
-			return "unknown"
+
+	// First pass: resolve all participants so we can build a directory.
+	for _, m := range msgs {
+		uid := m.User
+		if uid == "" {
+			uid = m.BotID
 		}
-		if name, ok := nameCache[userID]; ok {
-			return name
-		}
-		if info, err := client.GetUserInfo(userID); err == nil && info.RealName != "" {
-			nameCache[userID] = info.RealName
-			return info.RealName
-		}
-		// Fallback: keep the raw Slack mention so the AI still sees something.
-		nameCache[userID] = fmt.Sprintf("<@%s>", userID)
-		return nameCache[userID]
+		resolveUser(client, nameCache, uid)
 	}
 
 	var sb strings.Builder
+
+	// Participants directory so the AI knows who is who and can tag them.
+	sb.WriteString("Participants in this thread:\n")
+	for uid, label := range nameCache {
+		if uid == botUserID {
+			continue
+		}
+		sb.WriteString(fmt.Sprintf("- %s\n", label))
+	}
+	sb.WriteString("\nConversation:\n")
+
 	var threadFiles []extract.FileAttachment
 	for _, m := range msgs {
 		user := m.User
 		if user == "" {
 			user = m.BotID
 		}
-		label := resolveUser(user)
+		label := resolveUser(client, nameCache, user)
 		sb.WriteString(fmt.Sprintf("%s: %s\n", label, m.Text))
 
 		if m.Timestamp == currentTS || len(m.Files) == 0 {
@@ -181,7 +218,7 @@ func handleAppMention(client *slack.Client, aiClient *ai.Client, botToken, botUs
 		log.Printf("[%s] extracted %d file(s) from mention", eid, len(files))
 	}
 
-	reply, err := callAI(aiClient, client, botToken, botUserID, eid, event.Channel, threadTS, event.TimeStamp, event.ThreadTimeStamp != "", text, files)
+	reply, err := callAI(aiClient, client, botToken, botUserID, eid, event.Channel, threadTS, event.TimeStamp, event.ThreadTimeStamp != "", event.User, text, files)
 	if err != nil {
 		reactError(client, eid, "error from AI", event.Channel, event.TimeStamp, err)
 		return
@@ -236,7 +273,7 @@ func handleDM(client *slack.Client, aiClient *ai.Client, botToken, botUserID str
 	AddInFlightMessage(event.Channel, event.TimeStamp)
 	defer RemoveInFlightMessage(event.Channel, event.TimeStamp)
 
-	reply, err := callAI(aiClient, client, botToken, botUserID, eid, event.Channel, threadTS, event.TimeStamp, event.ThreadTimeStamp != "", text, files)
+	reply, err := callAI(aiClient, client, botToken, botUserID, eid, event.Channel, threadTS, event.TimeStamp, event.ThreadTimeStamp != "", event.User, text, files)
 	if err != nil {
 		reactError(client, eid, "error from AI", event.Channel, event.TimeStamp, err)
 		return
@@ -258,14 +295,19 @@ func handleDM(client *slack.Client, aiClient *ai.Client, botToken, botUserID str
 
 // callAI dispatches to the right AI method based on whether we have a thread and/or files.
 // It also handles the fallback if fetching thread context fails.
-func callAI(aiClient *ai.Client, slackClient *slack.Client, botToken, botUserID, eid, channel, threadTS, currentTS string, inThread bool, text string, files []extract.FileAttachment) (string, error) {
+func callAI(aiClient *ai.Client, slackClient *slack.Client, botToken, botUserID, eid, channel, threadTS, currentTS string, inThread bool, callerUserID, text string, files []extract.FileAttachment) (string, error) {
 	ctx := context.Background()
 
+	// Resolve the caller so the AI knows who is asking and can tag them.
+	nameCache := map[string]string{botUserID: "PAI (you)"}
+	callerLabel := resolveUser(slackClient, nameCache, callerUserID)
+
 	if !inThread {
+		taggedText := fmt.Sprintf("[From: %s]\n%s", callerLabel, text)
 		if len(files) > 0 {
-			return aiClient.ChatWithFiles(ctx, text, files)
+			return aiClient.ChatWithFiles(ctx, taggedText, files)
 		}
-		return aiClient.Chat(ctx, text)
+		return aiClient.Chat(ctx, taggedText)
 	}
 
 	threadContext, threadFiles, err := fetchThreadContext(slackClient, botToken, botUserID, channel, threadTS, currentTS)
