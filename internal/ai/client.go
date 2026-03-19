@@ -3,6 +3,7 @@ package ai
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/jonasbg/paibot/internal/config"
 	"github.com/jonasbg/paibot/internal/extract"
@@ -26,10 +27,24 @@ func NewClient(baseURL, apiKey string, cfg *config.BotConfig) *Client {
 	}
 }
 
+// buildSystemPrompt adds current date/time and workspace context to the system prompt
+func (a *Client) buildSystemPrompt(basePrompt string) string {
+	now := time.Now()
+	dayName := now.Weekday().String()
+	dateStr := now.Format("January 2, 2006") // e.g., "March 19, 2026"
+	timeStr := now.Format("15:04:05")        // e.g., "14:30:45"
+
+	header := fmt.Sprintf("**Current context:**\nDay: %s\nDate: %s\nTime: %s (UTC)\nWorkspace: Norsk helsenett SF\n\n", dayName, dateStr, timeStr)
+
+	return header + basePrompt
+}
+
 func (a *Client) sendMessage(ctx context.Context, system string, messages []openai.ChatCompletionMessageParamUnion) (string, error) {
 	all := make([]openai.ChatCompletionMessageParamUnion, 0, len(messages)+1)
 	if system != "" {
-		all = append(all, openai.SystemMessage(system))
+		// Add current date/time and workspace context to the system prompt
+		enrichedSystem := a.buildSystemPrompt(system)
+		all = append(all, openai.SystemMessage(enrichedSystem))
 	}
 	all = append(all, messages...)
 
