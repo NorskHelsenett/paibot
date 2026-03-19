@@ -94,7 +94,7 @@ func main() {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		bot.HandleEvents(client, aiClient, botToken, authResp.UserID, socketClient)
+		bot.HandleEvents(client, aiClient, botToken, authResp.UserID, socketClient, botCfg)
 	}()
 
 	// Start socket client in a goroutine

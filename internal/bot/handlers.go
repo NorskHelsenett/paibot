@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/jonasbg/paibot/internal/ai"
+	"github.com/jonasbg/paibot/internal/config"
 	"github.com/jonasbg/paibot/internal/extract"
 	"github.com/jonasbg/paibot/internal/logutil"
 	"github.com/slack-go/slack"
@@ -63,6 +64,8 @@ func nextEventID() string {
 	return hex.EncodeToString(b)
 }
 
+var cfg *config.BotConfig
+
 func react(client *slack.Client, add bool, emoji, channel, ts string) {
 	ref := slack.ItemRef{Channel: channel, Timestamp: ts}
 	if add {
@@ -74,8 +77,8 @@ func react(client *slack.Client, add bool, emoji, channel, ts string) {
 
 func reactError(client *slack.Client, eid, msg, channel, ts string, err error) {
 	log.Printf("[%s] %s: %v", eid, msg, err)
-	react(client, false, "thinking_face", channel, ts)
-	react(client, true, "usererror", channel, ts)
+	react(client, false, cfg.Reactions.Thinking, channel, ts)
+	react(client, true, cfg.Reactions.Error, channel, ts)
 }
 
 // resolveUser looks up a Slack user by ID and returns "DisplayName (<@ID>)".
@@ -205,7 +208,7 @@ func handleAppMention(client *slack.Client, aiClient *ai.Client, botToken, botUs
 	}
 
 	log.Printf("[%s] mention from user=%s channel=%s:%s — forwarding to AI", eid, event.User, event.Channel, threadTS)
-	react(client, true, "thinking_face", event.Channel, event.TimeStamp)
+	react(client, true, cfg.Reactions.Thinking, event.Channel, event.TimeStamp)
 	AddInFlightMessage(event.Channel, event.TimeStamp)
 	defer RemoveInFlightMessage(event.Channel, event.TimeStamp)
 
@@ -233,8 +236,8 @@ func handleAppMention(client *slack.Client, aiClient *ai.Client, botToken, botUs
 		return
 	}
 
-	react(client, false, "thinking_face", event.Channel, event.TimeStamp)
-	react(client, true, "white_check_mark", event.Channel, event.TimeStamp)
+	react(client, false, cfg.Reactions.Thinking, event.Channel, event.TimeStamp)
+	react(client, true, cfg.Reactions.Success, event.Channel, event.TimeStamp)
 	log.Printf("[%s] answered", eid)
 }
 
@@ -269,7 +272,7 @@ func handleDM(client *slack.Client, aiClient *ai.Client, botToken, botUserID str
 	}
 
 	log.Printf("[%s] DM from user=%s — forwarding to AI", eid, event.User)
-	react(client, true, "thinking_face", event.Channel, event.TimeStamp)
+	react(client, true, cfg.Reactions.Thinking, event.Channel, event.TimeStamp)
 	AddInFlightMessage(event.Channel, event.TimeStamp)
 	defer RemoveInFlightMessage(event.Channel, event.TimeStamp)
 
@@ -288,8 +291,8 @@ func handleDM(client *slack.Client, aiClient *ai.Client, botToken, botUserID str
 		return
 	}
 
-	react(client, false, "thinking_face", event.Channel, event.TimeStamp)
-	react(client, true, "white_check_mark", event.Channel, event.TimeStamp)
+	react(client, false, cfg.Reactions.Thinking, event.Channel, event.TimeStamp)
+	react(client, true, cfg.Reactions.Success, event.Channel, event.TimeStamp)
 	log.Printf("[%s] answered", eid)
 }
 
@@ -347,14 +350,15 @@ func MarkInFlightAsError(client *slack.Client) {
 
 	log.Printf("Marking %d in-flight message(s) as error", len(messages))
 	for _, msg := range messages {
-		react(client, false, "thinking_face", msg.Channel, msg.Timestamp)
-		react(client, true, "skull", msg.Channel, msg.Timestamp)
+		react(client, false, cfg.Reactions.Thinking, msg.Channel, msg.Timestamp)
+		react(client, true, cfg.Reactions.Fatal, msg.Channel, msg.Timestamp)
 		log.Printf("Marked message %s:%s as error", msg.Channel, msg.Timestamp)
 	}
 }
 
 // HandleEvents is the main event loop consuming socket mode events.
-func HandleEvents(client *slack.Client, aiClient *ai.Client, botToken, botUserID string, socketClient *socketmode.Client) {
+func HandleEvents(client *slack.Client, aiClient *ai.Client, botToken, botUserID string, socketClient *socketmode.Client, botCfg *config.BotConfig) {
+	cfg = botCfg
 	for evt := range socketClient.Events {
 		switch evt.Type {
 		case socketmode.EventTypeConnecting:

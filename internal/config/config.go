@@ -17,6 +17,12 @@ type BotConfig struct {
 		Chat   string `yaml:"chat"`
 		Thread string `yaml:"thread"`
 	} `yaml:"prompts"`
+	Reactions struct {
+		Thinking string `yaml:"thinking"`
+		Success  string `yaml:"success"`
+		Error    string `yaml:"error"`
+		Fatal    string `yaml:"fatal"`
+	} `yaml:"reactions"`
 }
 
 // Load reads and parses the YAML config file.
@@ -35,6 +41,19 @@ func Load(path string) (*BotConfig, error) {
 
 	cfg.Prompts.Chat = strings.TrimSpace(cfg.Prompts.Chat)
 	cfg.Prompts.Thread = strings.TrimSpace(cfg.Prompts.Thread)
+
+	if cfg.Reactions.Thinking == "" {
+		cfg.Reactions.Thinking = "thinking_face"
+	}
+	if cfg.Reactions.Success == "" {
+		cfg.Reactions.Success = "yes_check_mark_animated"
+	}
+	if cfg.Reactions.Error == "" {
+		cfg.Reactions.Error = "usererror"
+	}
+	if cfg.Reactions.Fatal == "" {
+		cfg.Reactions.Fatal = "skull"
+	}
 
 	if cfg.Model == "" {
 		return nil, fmt.Errorf("config: model is required")

@@ -3,6 +3,13 @@ model: "nhn-medium"
 temperature: 0.7
 max_tokens: 0 # 0 = use model default
 
+# Reaction emojis
+reactions:
+  thinking: "thinking_face"       # shown while processing
+  success: "yes_check_mark_animated" # shown on success
+  error: "usererror"               # shown on user-facing errors
+  fatal: "skull"                   # shown on shutdown/fatal errors
+
 # System prompts
 prompts:
   # Default system prompt used for direct messages and @mentions
