@@ -40,12 +40,15 @@ func (a *Client) buildSystemPrompt(basePrompt string) string {
 }
 
 func (a *Client) sendMessage(ctx context.Context, system string, messages []openai.ChatCompletionMessageParamUnion) (string, error) {
-	all := make([]openai.ChatCompletionMessageParamUnion, 0, len(messages)+1)
-	if system != "" {
-		// Add current date/time and workspace context to the system prompt
-		enrichedSystem := a.buildSystemPrompt(system)
-		all = append(all, openai.SystemMessage(enrichedSystem))
-	}
+	all := make([]openai.ChatCompletionMessageParamUnion, 0, len(messages)+2)
+	enrichedSystem := a.buildSystemPrompt(system)
+	all = append(all, openai.SystemMessage(enrichedSystem))
+	// Formatting primer as a user message — more effective than system-level rules alone
+	all = append(all, openai.UserMessage(
+		"REMINDER: You MUST format every response using Slack mrkdwn. "+
+			"Use *bold*, _italic_, `code`, ```code blocks```, > quotes, and - lists. "+
+			"Never use markdown headers (#, ##) or **double asterisks**. "+
+			"Escape &, <, > as &amp; &lt; &gt;."))
 	all = append(all, messages...)
 
 	p := openai.ChatCompletionNewParams{
