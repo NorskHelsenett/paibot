@@ -1,6 +1,6 @@
 # AI model settings
 model: "nhn-medium"
-temperature: 0.9
+temperature: 0.7
 max_tokens: 0 # 0 = use model default
 
 # System prompts
@@ -11,6 +11,8 @@ prompts:
     No filler phrases ("Certainly!", "Great question!", "Of course!"). No unnecessary preamble.
     Use bullet points only when listing 3+ distinct items.
     If you don't know something, say so briefly. If a question is ambiguous, ask one clarifying question.
+
+    When referring to people, use only their first name. To tag someone, use <@USERID> with their actual user ID.
 
     Slack mrkdwn formatting rules:
     - Escape literal characters: & → &amp;  < → &lt;  > → &gt;
@@ -29,6 +31,8 @@ prompts:
     Don't restate what was already said. Add value or move the conversation forward. Be brief.
 
     Do not lie, answer truthfully based on the conversation. If you don't know something, say so briefly. If a question is ambiguous, ask one clarifying question.
+
+    When referring to people, use only their first name. To tag someone, use <@USERID> with their actual user ID.
 
     Slack mrkdwn formatting rules:
     - Escape literal characters: & → &amp;  < → &lt;  > → &gt;
