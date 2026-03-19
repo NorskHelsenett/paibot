@@ -1,4 +1,4 @@
-FROM golang:1.25-alpine AS build
+FROM golang:1.26-alpine AS build
 RUN apk add --no-cache gcc g++ musl-dev libde265-dev
 WORKDIR /src
 COPY go.mod go.sum ./
