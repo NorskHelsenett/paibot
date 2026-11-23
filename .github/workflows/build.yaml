@@ -52,6 +52,11 @@ jobs:
             type=ref,event=branch
             type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', 'main') }}
             type=raw,value=dev,enable=${{ github.ref != format('refs/heads/{0}', 'main') }}
+          labels: |
+            org.opencontainers.image
+            org.opencontainers.image.title=paibot
+            org.opencontainers.image.description=AI Slack bot
+            org.opencontainers.image.vendor=NorskHelsenett
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -64,7 +69,10 @@ jobs:
           buildkitd-flags: --debug
 
       - name: Get git commit timestamp for reproducible builds
-        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)" >> "$GITHUB_ENV"
+        id: build-date
+        run: |
+          echo "SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)" >> "$GITHUB_ENV"
+          echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
       - name: Export repository info
         id: export-vars
@@ -92,6 +100,9 @@ jobs:
           sbom: false
           build-args: |
             SOURCE_DATE_EPOCH=${{ env.SOURCE_DATE_EPOCH }}
+            GIT_COMMIT=${{ github.sha }}
+            GIT_BRANCH=${{ github.ref_name }}
+            BUILD_DATE=${{ steps.build-date.outputs.date }}
 
   deploy-helm:
     runs-on: ubuntu-latest
